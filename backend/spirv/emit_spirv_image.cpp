@@ -393,7 +393,7 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
                                                        coords, operands.MaskOptional(),
                                                        operands.Span())};
         const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
-        const Id cmp{ctx.OpFOrdLessThanEqual(ctx.U1, depth, dref)};
+        const Id cmp{ctx.OpFOrdGreaterThanEqual(ctx.U1, depth, dref)};
         return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
     }
     if (ctx.stage == Stage::Fragment) {
@@ -422,7 +422,7 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
         const Id sample{ctx.OpImageSampleExplicitLod(ctx.F32[4], Texture(ctx, info, index),
                                                        coords, operands.Mask(), operands.Span())};
         const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
-        const Id cmp{ctx.OpFOrdLessThanEqual(ctx.U1, depth, dref)};
+        const Id cmp{ctx.OpFOrdGreaterThanEqual(ctx.U1, depth, dref)};
         return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
     }
     const ImageOperands operands(ctx, false, true, false, lod, offset);
