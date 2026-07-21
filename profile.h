@@ -82,6 +82,8 @@ struct Profile {
     u32 max_subgroup_size{};
     /// Some drivers have broken indirect access chains for vector types
     bool has_broken_spirv_vector_access_chain{};
+    /// Native depth-compare (Dref) sampling produces incorrect/missing results on host driver
+    bool has_broken_texture_shadow_compare{};  
     /// HACK: Subgroup shuffle can be extremely costly to emulate on GPUs not supporting it in HW
     bool disable_subgroup_shuffle{};
 
