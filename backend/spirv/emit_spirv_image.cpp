@@ -384,11 +384,21 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Value&
 }
 
 Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Value& index,
-                                  Id coords, Id dref, Id bias_lc, const IR::Value& offset) {
+                                   Id coords, Id dref, Id bias_lc, const IR::Value& offset) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
+    if (ctx.profile.has_broken_texture_shadow_compare) {
+        const ImageOperands operands(ctx, info.has_bias != 0, false, info.has_lod_clamp != 0,
+                                      bias_lc, offset);
+        const Id sample{ctx.OpImageSampleImplicitLod(ctx.F32[4], Texture(ctx, info, index),
+                                                       coords, operands.MaskOptional(),
+                                                       operands.Span())};
+        const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
+        const Id cmp{ctx.OpFOrdLessThanEqual(ctx.U1, depth, dref)};
+        return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
+    }
     if (ctx.stage == Stage::Fragment) {
         const ImageOperands operands(ctx, info.has_bias != 0, false, info.has_lod_clamp != 0,
-                                     bias_lc, offset);
+                                      bias_lc, offset);
         return Emit(&EmitContext::OpImageSparseSampleDrefImplicitLod,
                     &EmitContext::OpImageSampleDrefImplicitLod, ctx, inst, ctx.F32[1],
                     Texture(ctx, info, index), coords, dref, operands.MaskOptional(),
@@ -405,8 +415,16 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
 }
 
 Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Value& index,
-                                  Id coords, Id dref, Id lod, const IR::Value& offset) {
+                                   Id coords, Id dref, Id lod, const IR::Value& offset) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
+    if (ctx.profile.has_broken_texture_shadow_compare) {
+        const ImageOperands operands(ctx, false, true, false, lod, offset);
+        const Id sample{ctx.OpImageSampleExplicitLod(ctx.F32[4], Texture(ctx, info, index),
+                                                       coords, operands.Mask(), operands.Span())};
+        const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
+        const Id cmp{ctx.OpFOrdLessThanEqual(ctx.U1, depth, dref)};
+        return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
+    }
     const ImageOperands operands(ctx, false, true, false, lod, offset);
     return Emit(&EmitContext::OpImageSparseSampleDrefExplicitLod,
                 &EmitContext::OpImageSampleDrefExplicitLod, ctx, inst, ctx.F32[1],
