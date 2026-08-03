@@ -23,7 +23,9 @@ public:
     [[nodiscard]] virtual TextureType ReadTextureType(u32 raw_handle) = 0;
 
     [[nodiscard]] virtual TexturePixelFormat ReadTexturePixelFormat(u32 raw_handle) = 0;
-
+    
+    [[nodiscard]] virtual CompareFunction ReadTextureCompareFunc(u32 raw_handle) = 0;
+  
     [[nodiscard]] virtual u32 ReadViewportTransformState() = 0;
 
     [[nodiscard]] virtual u32 TextureBoundBuffer() const = 0;
