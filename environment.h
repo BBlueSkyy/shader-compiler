@@ -7,6 +7,7 @@
 
 #include <shader_compiler/common/common_types.h>
 #include <shader_compiler/program_header.h>
+#include <shader_compiler/runtime_info.h>
 #include <shader_compiler/shader_info.h>
 #include <shader_compiler/stage.h>
 
