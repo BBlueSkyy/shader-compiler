@@ -33,6 +33,7 @@ enum class TextureType : u32 {
     Buffer,
     Color2DRect,
 };
+
 constexpr u32 NUM_TEXTURE_TYPES = 9;
 
 enum class TexturePixelFormat : u32 {
@@ -43,17 +44,6 @@ enum class TexturePixelFormat : u32 {
     R16G16_SNORM,
     R16_SNORM,
     OTHER
-};
-
-enum class CompareFunction : u32 {
-    Never,
-    Less,
-    Equal,
-    LessEqual,
-    Greater,
-    NotEqual,
-    GreaterEqual,
-    Always,
 };
 
 enum class ImageFormat : u32 {
