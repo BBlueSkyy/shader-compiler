@@ -45,6 +45,17 @@ enum class TexturePixelFormat : u32 {
     OTHER
 };
 
+enum class CompareFunction : u32 {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+};
+
 enum class ImageFormat : u32 {
     Typeless,
     R8_UINT,
