@@ -31,6 +31,16 @@ struct FpControl {
 };
 static_assert(sizeof(FpControl) <= sizeof(u32));
 
+enum class TextureCompareFunc : u32 {
+    Never = 0,
+    Less = 1,
+    Equal = 2,
+    LessOrEqual = 3,
+    Greater = 4,
+    NotEqual = 5,
+    GreaterOrEqual = 6,
+    Always = 7,
+};
 union TextureInstInfo {
     u32 raw;
     BitField<0, 16, u32> descriptor_index;
@@ -42,6 +52,9 @@ union TextureInstInfo {
     BitField<23, 2, u32> gather_component;
     BitField<25, 2, u32> num_derivates;
     BitField<27, 3, ImageFormat> image_format;
+    // Dref instructions do not consume image_format, so the top bit of that field can be
+    // shared to preserve all eight sampler comparison functions without growing this union.
+    BitField<29, 3, TextureCompareFunc> compare_func;
 };
 static_assert(sizeof(TextureInstInfo) <= sizeof(u32));
 

@@ -365,6 +365,39 @@ TextureType ReadTextureType(Environment& env, const ConstBufferAddr& cbuf) {
     return env.ReadTextureType(lhs_raw | rhs_raw);
 }
 
+CompareFunction ReadTextureCompareFunc(Environment& env, const ConstBufferAddr& cbuf) {
+    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
+    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
+
+    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset) << cbuf.shift_left};
+    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)
+                      << cbuf.secondary_shift_left};
+
+    return env.ReadTextureCompareFunc(lhs_raw | rhs_raw);
+}
+
+IR::TextureCompareFunc NarrowTextureCompareFunc(CompareFunction func) {
+    switch (func) {
+    case CompareFunction::Never:
+        return IR::TextureCompareFunc::Never;
+    case CompareFunction::Less:
+        return IR::TextureCompareFunc::Less;
+    case CompareFunction::Equal:
+        return IR::TextureCompareFunc::Equal;
+    case CompareFunction::LessThanEqual:
+        return IR::TextureCompareFunc::LessOrEqual;
+    case CompareFunction::Greater:
+        return IR::TextureCompareFunc::Greater;
+    case CompareFunction::NotEqual:
+        return IR::TextureCompareFunc::NotEqual;
+    case CompareFunction::GreaterThanEqual:
+        return IR::TextureCompareFunc::GreaterOrEqual;
+    case CompareFunction::Always:
+        return IR::TextureCompareFunc::Always;
+    }
+    throw InvalidArgument("Invalid texture comparison function {}", func);
+}
+
 TexturePixelFormat ReadTexturePixelFormat(Environment& env, const ConstBufferAddr& cbuf) {
     const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
     const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
@@ -548,6 +581,13 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 // the rasterizer robustness handle it
                 // This happens on Fire Emblem: Three Houses
                 flags.type.Assign(TextureType::Buffer);
+            }
+            break;
+        case IR::Opcode::ImageSampleDrefImplicitLod:
+        case IR::Opcode::ImageSampleDrefExplicitLod:
+            if (host_info.has_broken_texture_shadow_compare) {
+                flags.compare_func.Assign(
+                    NarrowTextureCompareFunc(ReadTextureCompareFunc(env, cbuf)));
             }
             break;
         default:
