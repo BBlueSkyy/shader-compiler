@@ -7,6 +7,7 @@
 
 #include <shader_compiler/common/common_types.h>
 #include <shader_compiler/program_header.h>
+#include <shader_compiler/runtime_info.h>
 #include <shader_compiler/shader_info.h>
 #include <shader_compiler/stage.h>
 
@@ -21,6 +22,8 @@ public:
     [[nodiscard]] virtual u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) = 0;
 
     [[nodiscard]] virtual TextureType ReadTextureType(u32 raw_handle) = 0;
+
+    [[nodiscard]] virtual CompareFunction ReadTextureCompareFunc(u32 raw_handle) = 0;
 
     [[nodiscard]] virtual TexturePixelFormat ReadTexturePixelFormat(u32 raw_handle) = 0;
 
