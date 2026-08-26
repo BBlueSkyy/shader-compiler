@@ -253,6 +253,50 @@ Id BitTest(EmitContext& ctx, Id mask, Id bit) {
     const Id bit_value{ctx.OpBitwiseAnd(ctx.U32[1], shifted, ctx.Const(1u))};
     return ctx.OpINotEqual(ctx.U1, bit_value, ctx.u32_zero_value);
 }
+
+CompareFunction WidenTextureCompareFunc(IR::TextureCompareFunc func) {
+    switch (func) {
+    case IR::TextureCompareFunc::Never:
+        return CompareFunction::Never;
+    case IR::TextureCompareFunc::Less:
+        return CompareFunction::Less;
+    case IR::TextureCompareFunc::Equal:
+        return CompareFunction::Equal;
+    case IR::TextureCompareFunc::LessOrEqual:
+        return CompareFunction::LessThanEqual;
+    case IR::TextureCompareFunc::Greater:
+        return CompareFunction::Greater;
+    case IR::TextureCompareFunc::NotEqual:
+        return CompareFunction::NotEqual;
+    case IR::TextureCompareFunc::GreaterOrEqual:
+        return CompareFunction::GreaterThanEqual;
+    case IR::TextureCompareFunc::Always:
+        return CompareFunction::Always;
+    }
+    throw InvalidArgument("Invalid texture comparison function {}", func);
+}
+
+Id ComparisonFunction(EmitContext& ctx, CompareFunction comparison, Id operand_1, Id operand_2) {
+    switch (comparison) {
+    case CompareFunction::Never:
+        return ctx.false_value;
+    case CompareFunction::Less:
+        return ctx.OpFOrdLessThan(ctx.U1, operand_1, operand_2);
+    case CompareFunction::Equal:
+        return ctx.OpFOrdEqual(ctx.U1, operand_1, operand_2);
+    case CompareFunction::LessThanEqual:
+        return ctx.OpFOrdLessThanEqual(ctx.U1, operand_1, operand_2);
+    case CompareFunction::Greater:
+        return ctx.OpFOrdGreaterThan(ctx.U1, operand_1, operand_2);
+    case CompareFunction::NotEqual:
+        return ctx.OpFOrdNotEqual(ctx.U1, operand_1, operand_2);
+    case CompareFunction::GreaterThanEqual:
+        return ctx.OpFOrdGreaterThanEqual(ctx.U1, operand_1, operand_2);
+    case CompareFunction::Always:
+        return ctx.true_value;
+    }
+    throw InvalidArgument("Comparison function {}", comparison);
+}
 } // Anonymous namespace
 
 Id EmitBindlessImageSampleImplicitLod(EmitContext&) {
@@ -391,7 +435,7 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
                                                        coords, operands.MaskOptional(),
                                                        operands.Span())};
         const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
-        const Id cmp{ctx.OpFOrdGreaterThanEqual(ctx.U1, depth, dref)};
+        const Id cmp{ComparisonFunction(ctx, WidenTextureCompareFunc(info.compare_func), dref, depth)};
         return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
     }
     if (ctx.stage == Stage::Fragment) {
@@ -420,7 +464,7 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
         const Id sample{ctx.OpImageSampleExplicitLod(ctx.F32[4], Texture(ctx, info, index),
                                                        coords, operands.Mask(), operands.Span())};
         const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
-        const Id cmp{ctx.OpFOrdGreaterThanEqual(ctx.U1, depth, dref)};
+        const Id cmp{ComparisonFunction(ctx, WidenTextureCompareFunc(info.compare_func), dref, depth)};
         return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
     }
     const ImageOperands operands(ctx, false, true, false, lod, offset);
