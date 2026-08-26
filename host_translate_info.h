@@ -18,8 +18,6 @@ struct HostTranslateInfo {
     u32 min_ssbo_alignment{};            ///< Minimum alignment supported by the device for SSBOs
     bool support_geometry_shader_passthrough{}; ///< True when the device supports geometry
                                                 ///< passthrough shaders
-    bool has_broken_texture_shadow_compare{}; ///< True when native depth comparison must be
-                                              ///< lowered to a shader comparison
 };
 
 } // namespace Shader
