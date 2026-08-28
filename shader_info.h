@@ -45,6 +45,25 @@ enum class TexturePixelFormat : u32 {
     OTHER
 };
 
+enum class TextureSwizzle : u32 {
+    Zero,
+    R,
+    G,
+    B,
+    A,
+    One,
+};
+
+struct TextureSwizzleMapping {
+    TextureSwizzle r{TextureSwizzle::R};
+    TextureSwizzle g{TextureSwizzle::G};
+    TextureSwizzle b{TextureSwizzle::B};
+    TextureSwizzle a{TextureSwizzle::A};
+
+    auto operator<=>(const TextureSwizzleMapping&) const = default;
+};
+static_assert(sizeof(TextureSwizzleMapping) == 0x10);
+
 enum class ImageFormat : u32 {
     Typeless,
     R8_UINT,

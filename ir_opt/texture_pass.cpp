@@ -406,6 +406,14 @@ TexturePixelFormat ReadTexturePixelFormat(Environment& env, const ConstBufferAdd
     return env.ReadTexturePixelFormat(lhs_raw | rhs_raw);
 }
 
+TextureSwizzleMapping ReadTextureSwizzle(Environment& env, const ConstBufferAddr& cbuf) {
+    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
+    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
+    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset)};
+    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)};
+    return env.ReadTextureSwizzle(lhs_raw | rhs_raw);
+}
+
 class Descriptors {
 public:
     explicit Descriptors(TextureBufferDescriptors& texture_buffer_descriptors_,
@@ -495,7 +503,12 @@ void PatchImageSampleImplicitLod(IR::Block& block, IR::Inst& inst) {
                         ir.FPRecip(ir.ConvertUToF(32, 32, ir.CompositeExtract(texture_size, 1))))));
 }
 
-void PatchTexelFetch(IR::Block& block, IR::Inst& inst, TexturePixelFormat pixel_format) {
+void PatchTexelFetch(IR::Block& block, IR::Inst& inst, TexturePixelFormat pixel_format,
+                     TextureSwizzleMapping swizzle) {
+    if (pixel_format == TexturePixelFormat::OTHER && swizzle == TextureSwizzleMapping{}) {
+        return;
+    }
+
     const auto it{IR::Block::InstructionList::s_iterator_to(inst)};
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     auto get_max_value = [pixel_format]() -> float {
@@ -518,13 +531,38 @@ void PatchTexelFetch(IR::Block& block, IR::Inst& inst, TexturePixelFormat pixel_
     const IR::F32 y(ir.CompositeExtract(new_inst, 1));
     const IR::F32 z(ir.CompositeExtract(new_inst, 2));
     const IR::F32 w(ir.CompositeExtract(new_inst, 3));
-    const IR::F16F32F64 max_value(ir.Imm32(get_max_value()));
-    const IR::Value converted =
-        ir.CompositeConstruct(ir.FPMul(ir.ConvertSToF(32, 32, ir.BitCast<IR::S32>(x)), max_value),
-                              ir.FPMul(ir.ConvertSToF(32, 32, ir.BitCast<IR::S32>(y)), max_value),
-                              ir.FPMul(ir.ConvertSToF(32, 32, ir.BitCast<IR::S32>(z)), max_value),
-                              ir.FPMul(ir.ConvertSToF(32, 32, ir.BitCast<IR::S32>(w)), max_value));
-    inst.ReplaceUsesWith(converted);
+    std::array<IR::F32, 4> components{x, y, z, w};
+
+    if (pixel_format != TexturePixelFormat::OTHER) {
+        const IR::F16F32F64 max_value(ir.Imm32(get_max_value()));
+        for (IR::F32& component : components) {
+            component = IR::F32{ir.FPMul(
+                ir.ConvertSToF(32, 32, ir.BitCast<IR::S32>(component)), max_value)};
+        }
+    }
+
+    const auto select_component{[&](TextureSwizzle component) -> IR::F32 {
+        switch (component) {
+        case TextureSwizzle::Zero:
+            return ir.Imm32(0.0f);
+        case TextureSwizzle::R:
+            return components[0];
+        case TextureSwizzle::G:
+            return components[1];
+        case TextureSwizzle::B:
+            return components[2];
+        case TextureSwizzle::A:
+            return components[3];
+        case TextureSwizzle::One:
+            return ir.Imm32(1.0f);
+        }
+        throw InvalidArgument("Invalid texture swizzle");
+    }};
+
+    inst.ReplaceUsesWith(ir.CompositeConstruct(select_component(swizzle.r),
+                                               select_component(swizzle.g),
+                                               select_component(swizzle.b),
+                                               select_component(swizzle.a)));
 }
 } // Anonymous namespace
 
@@ -680,12 +718,12 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             inst->SetArg(0, IR::Value{});
         }
 
-        if (!host_info.support_snorm_render_buffer && inst->GetOpcode() == IR::Opcode::ImageFetch &&
-            flags.type == TextureType::Buffer) {
-            const auto pixel_format = ReadTexturePixelFormat(env, cbuf);
-            if (pixel_format != TexturePixelFormat::OTHER) {
-                PatchTexelFetch(*texture_inst.block, *texture_inst.inst, pixel_format);
-            }
+        if (inst->GetOpcode() == IR::Opcode::ImageFetch && flags.type == TextureType::Buffer) {
+            const auto pixel_format{host_info.support_snorm_render_buffer
+                                        ? TexturePixelFormat::OTHER
+                                        : ReadTexturePixelFormat(env, cbuf)};
+            PatchTexelFetch(*texture_inst.block, *texture_inst.inst, pixel_format,
+                            ReadTextureSwizzle(env, cbuf));
         }
     }
 }
