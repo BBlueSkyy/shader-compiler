@@ -218,6 +218,20 @@ void EmitGetAttribute(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr,
         ctx.AddF32("{}={}{}.{};", inst, input_decorator, ctx.position_name, swizzle);
         break;
     }
+    case IR::Attribute::ClipDistance0:
+    case IR::Attribute::ClipDistance1:
+    case IR::Attribute::ClipDistance2:
+    case IR::Attribute::ClipDistance3:
+    case IR::Attribute::ClipDistance4:
+    case IR::Attribute::ClipDistance5:
+    case IR::Attribute::ClipDistance6:
+    case IR::Attribute::ClipDistance7: {
+        const u32 index{static_cast<u32>(attr) - static_cast<u32>(IR::Attribute::ClipDistance0)};
+        const bool is_array{IsInputArray(ctx.stage)};
+        const auto input_decorator{is_array ? fmt::format("gl_in[{}].", vertex) : ""};
+        ctx.AddF32("{}={}gl_ClipDistance[{}];", inst, input_decorator, index);
+        break;
+    }
     case IR::Attribute::PointSpriteS:
     case IR::Attribute::PointSpriteT:
         ctx.AddF32("{}=gl_PointCoord.{};", inst, swizzle);
