@@ -1454,6 +1454,10 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         loads[IR::Attribute::TessellationEvaluationPointV]) {
         tess_coord = DefineInput(*this, F32[3], false, spv::BuiltIn::TessCoord);
     }
+    if (loads.ClipDistances()) {
+        const Id type{TypeArray(F32[1], Const(8U))};
+        input_clip_distances = DefineInput(*this, type, true, spv::BuiltIn::ClipDistance);
+    }
     for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
         const AttributeType input_type{runtime_info.generic_input_types[index]};
         if (!runtime_info.previous_stage_stores.Generic(index)) {
