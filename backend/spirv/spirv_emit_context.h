@@ -237,6 +237,7 @@ public:
     Id front_face{};
     Id point_coord{};
     Id tess_coord{};
+    Id input_clip_distances{};
     Id clip_distances{};
     Id layer{};
     Id viewport_index{};
