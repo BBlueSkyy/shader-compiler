@@ -329,6 +329,21 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, Id vertex) {
                 ? AttrPointer(ctx, ctx.input_f32, vertex, ctx.input_position, ctx.u32_zero_value,
                               ctx.Const(element))
                 : AttrPointer(ctx, ctx.input_f32, vertex, ctx.input_position, ctx.Const(element)));
+    case IR::Attribute::ClipDistance0:
+    case IR::Attribute::ClipDistance1:
+    case IR::Attribute::ClipDistance2:
+    case IR::Attribute::ClipDistance3:
+    case IR::Attribute::ClipDistance4:
+    case IR::Attribute::ClipDistance5:
+    case IR::Attribute::ClipDistance6:
+    case IR::Attribute::ClipDistance7: {
+        const u32 base{static_cast<u32>(IR::Attribute::ClipDistance0)};
+        const u32 index{static_cast<u32>(attr) - base};
+        const Id clip_num{ctx.Const(index)};
+        const Id pointer{
+            AttrPointer(ctx, ctx.input_f32, vertex, ctx.input_clip_distances, clip_num)};
+        return ctx.OpLoad(ctx.F32[1], pointer);
+    }
     case IR::Attribute::InstanceId:
         if (ctx.profile.support_vertex_instance_id) {
             return ctx.OpBitcast(ctx.F32[1], ctx.OpLoad(ctx.U32[1], ctx.instance_id));
