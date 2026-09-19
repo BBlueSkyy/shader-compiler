@@ -14,6 +14,9 @@ struct Profile {
     bool support_descriptor_aliasing{};
     bool support_int8{};
     bool support_int16{};
+    bool support_storage_int8{};
+    bool support_storage_int16{};
+    bool support_variable_pointers_storage_buffer{};
     bool support_int64{};
     bool support_vertex_instance_id{};
     bool support_float_controls{};
