@@ -506,6 +506,13 @@ void FoldBitCast(IR::Inst& inst, IR::Opcode reverse) {
         }
     }
     if constexpr (op == IR::Opcode::BitCastU32F32) {
+        if (arg_inst->GetOpcode() == IR::Opcode::GetCbufF32) {
+            // Recover the original untyped constant-buffer word.
+            inst.ReplaceOpcode(IR::Opcode::GetCbufU32);
+            inst.SetArg(0, arg_inst->Arg(0));
+            inst.SetArg(1, arg_inst->Arg(1));
+            return;
+        }
         // Workaround for new NVIDIA driver bug, where:
         // uint attr = ftou(itof(gl_InstanceID));
         // always returned 0.
