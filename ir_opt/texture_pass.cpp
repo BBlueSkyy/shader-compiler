@@ -333,7 +333,11 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst) {
     if (IsBindless(inst)) {
         const std::optional<ConstBufferAddr> track_addr{Track(inst.Arg(0), env)};
         if (!track_addr) {
-            throw NotImplementedException("Failed to track bindless texture constant buffer");
+            const IR::Inst* const handle_inst{inst.Arg(0).InstRecursive()};
+            throw NotImplementedException(
+                "Failed to track bindless texture constant buffer (texture opcode {}, handle opcode {})",
+                static_cast<u32>(inst.GetOpcode()),
+                handle_inst ? static_cast<u32>(handle_inst->GetOpcode()) : 0xffffffffu);
         }
         addr = *track_addr;
     } else {
