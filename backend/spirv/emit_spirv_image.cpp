@@ -429,14 +429,8 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
                                    Id coords, Id dref, Id bias_lc, const IR::Value& offset) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     if (ctx.profile.has_broken_texture_shadow_compare) {
-        const ImageOperands operands(ctx, info.has_bias != 0, false, info.has_lod_clamp != 0,
-                                      bias_lc, offset);
-        const Id sample{ctx.OpImageSampleImplicitLod(ctx.F32[4], Texture(ctx, info, index),
-                                                       coords, operands.MaskOptional(),
-                                                       operands.Span())};
-        const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
-        const Id cmp{ComparisonFunction(ctx, WidenTextureCompareFunc(info.compare_func), dref, depth)};
-        return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
+        // Diagnostic only: force depth comparison to fail so shadow-dependent shading becomes obvious.
+        return ctx.Const(0.0f);
     }
     if (ctx.stage == Stage::Fragment) {
         const ImageOperands operands(ctx, info.has_bias != 0, false, info.has_lod_clamp != 0,
@@ -460,12 +454,8 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
                                    Id coords, Id dref, Id lod, const IR::Value& offset) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     if (ctx.profile.has_broken_texture_shadow_compare) {
-        const ImageOperands operands(ctx, false, true, false, lod, offset);
-        const Id sample{ctx.OpImageSampleExplicitLod(ctx.F32[4], Texture(ctx, info, index),
-                                                       coords, operands.Mask(), operands.Span())};
-        const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
-        const Id cmp{ComparisonFunction(ctx, WidenTextureCompareFunc(info.compare_func), dref, depth)};
-        return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
+        // Diagnostic only: force depth comparison to fail so shadow-dependent shading becomes obvious.
+        return ctx.Const(0.0f);
     }
     const ImageOperands operands(ctx, false, true, false, lod, offset);
     return Emit(&EmitContext::OpImageSparseSampleDrefExplicitLod,
@@ -486,6 +476,11 @@ Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, const IR::Value& index,
                        const IR::Value& offset, const IR::Value& offset2, Id dref) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const ImageOperands operands(ctx, offset, offset2);
+    if (ctx.profile.has_broken_texture_shadow_compare) {
+        // Diagnostic only: force all four gathered depth comparisons to fail.
+        const Id zero{ctx.Const(0.0f)};
+        return ctx.OpCompositeConstruct(ctx.F32[4], zero, zero, zero, zero);
+    }
     return Emit(&EmitContext::OpImageSparseDrefGather, &EmitContext::OpImageDrefGather, ctx, inst,
                 ctx.F32[4], Texture(ctx, info, index), coords, dref, operands.MaskOptional(),
                 operands.Span());
