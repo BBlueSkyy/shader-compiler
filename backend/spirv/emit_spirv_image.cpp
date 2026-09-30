@@ -434,9 +434,8 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
         const Id sample{ctx.OpImageSampleImplicitLod(ctx.F32[4], Texture(ctx, info, index),
                                                        coords, operands.MaskOptional(),
                                                        operands.Span())};
-        const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
-        const Id cmp{ComparisonFunction(ctx, WidenTextureCompareFunc(info.compare_func), dref, depth)};
-        return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
+        // Diagnostic only: expose the raw shadow-map depth value as the shadow factor.
+        return ctx.OpCompositeExtract(ctx.F32[1], sample, 0U);
     }
     if (ctx.stage == Stage::Fragment) {
         const ImageOperands operands(ctx, info.has_bias != 0, false, info.has_lod_clamp != 0,
@@ -463,9 +462,8 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Va
         const ImageOperands operands(ctx, false, true, false, lod, offset);
         const Id sample{ctx.OpImageSampleExplicitLod(ctx.F32[4], Texture(ctx, info, index),
                                                        coords, operands.Mask(), operands.Span())};
-        const Id depth{ctx.OpCompositeExtract(ctx.F32[1], sample, 0U)};
-        const Id cmp{ComparisonFunction(ctx, WidenTextureCompareFunc(info.compare_func), dref, depth)};
-        return ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
+        // Diagnostic only: expose the raw shadow-map depth value as the shadow factor.
+        return ctx.OpCompositeExtract(ctx.F32[1], sample, 0U);
     }
     const ImageOperands operands(ctx, false, true, false, lod, offset);
     return Emit(&EmitContext::OpImageSparseSampleDrefExplicitLod,
@@ -486,6 +484,12 @@ Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, const IR::Value& index,
                        const IR::Value& offset, const IR::Value& offset2, Id dref) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const ImageOperands operands(ctx, offset, offset2);
+    if (ctx.profile.has_broken_texture_shadow_compare) {
+        // Diagnostic only: return the four raw depth texels instead of comparison results.
+        return Emit(&EmitContext::OpImageSparseGather, &EmitContext::OpImageGather, ctx, inst,
+                    ctx.F32[4], Texture(ctx, info, index), coords, ctx.u32_zero_value,
+                    operands.MaskOptional(), operands.Span());
+    }
     return Emit(&EmitContext::OpImageSparseDrefGather, &EmitContext::OpImageDrefGather, ctx, inst,
                 ctx.F32[4], Texture(ctx, info, index), coords, dref, operands.MaskOptional(),
                 operands.Span());
