@@ -486,6 +486,19 @@ Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, const IR::Value& index,
                        const IR::Value& offset, const IR::Value& offset2, Id dref) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const ImageOperands operands(ctx, offset, offset2);
+    if (ctx.profile.has_broken_texture_shadow_compare) {
+        const Id depths{Emit(&EmitContext::OpImageSparseGather, &EmitContext::OpImageGather, ctx,
+                             inst, ctx.F32[4], Texture(ctx, info, index), coords, ctx.Const(0U),
+                             operands.MaskOptional(), operands.Span())};
+        const auto comparison{WidenTextureCompareFunc(info.compare_func)};
+        std::array<Id, 4> results{};
+        for (u32 i = 0; i < results.size(); ++i) {
+            const Id depth{ctx.OpCompositeExtract(ctx.F32[1], depths, i)};
+            const Id cmp{ComparisonFunction(ctx, comparison, dref, depth)};
+            results[i] = ctx.OpSelect(ctx.F32[1], cmp, ctx.Const(1.0f), ctx.Const(0.0f));
+        }
+        return ctx.OpCompositeConstruct(ctx.F32[4], std::span{results});
+    }
     return Emit(&EmitContext::OpImageSparseDrefGather, &EmitContext::OpImageDrefGather, ctx, inst,
                 ctx.F32[4], Texture(ctx, info, index), coords, dref, operands.MaskOptional(),
                 operands.Span());
