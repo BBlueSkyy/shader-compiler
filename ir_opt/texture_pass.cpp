@@ -585,6 +585,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             break;
         case IR::Opcode::ImageSampleDrefImplicitLod:
         case IR::Opcode::ImageSampleDrefExplicitLod:
+        case IR::Opcode::ImageGatherDref:
             if (host_info.has_broken_texture_shadow_compare) {
                 flags.compare_func.Assign(
                     NarrowTextureCompareFunc(ReadTextureCompareFunc(env, cbuf)));
