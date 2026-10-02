@@ -31,16 +31,16 @@ Id ImageType(EmitContext& ctx, const TextureDescriptor& desc) {
     const bool depth{desc.is_depth};
     switch (desc.type) {
     case TextureType::Color1D:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, depth, false, false, 1, format);
+        return ctx.TypeImage(type, spv::Dim::Dim1D, depth, false, false, 1, format);
     case TextureType::ColorArray1D:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, depth, true, false, 1, format);
+        return ctx.TypeImage(type, spv::Dim::Dim1D, depth, true, false, 1, format);
     case TextureType::Color2D:
     case TextureType::Color2DRect:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, depth, false, false, 1, format);
+        return ctx.TypeImage(type, spv::Dim::Dim2D, depth, false, false, 1, format);
     case TextureType::ColorArray2D:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, depth, true, false, 1, format);
+        return ctx.TypeImage(type, spv::Dim::Dim2D, depth, true, false, 1, format);
     case TextureType::Color3D:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim3D, depth, false, false, 1, format);
+        return ctx.TypeImage(type, spv::Dim::Dim3D, depth, false, false, 1, format);
     case TextureType::ColorCube:
         return ctx.TypeImage(type, spv::Dim::Cube, depth, false, false, 1, format);
     case TextureType::ColorArrayCube:
