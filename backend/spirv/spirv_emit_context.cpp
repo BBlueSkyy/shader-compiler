@@ -73,20 +73,19 @@ spv::ImageFormat GetImageFormat(ImageFormat format) {
     throw InvalidArgument("Invalid image format {}", format);
 }
 
-Id ImageType(EmitContext& ctx, const ImageDescriptor& desc) {
+Id ImageType(EmitContext& ctx, const ImageDescriptor& desc, Id sampled_type) {
     const spv::ImageFormat format{GetImageFormat(desc.format)};
-    const Id type{ctx.U32[1]};
     switch (desc.type) {
     case TextureType::Color1D:
-        return ctx.TypeImage(type, spv::Dim::Dim1D, false, false, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, false, false, 2, format);
     case TextureType::ColorArray1D:
-        return ctx.TypeImage(type, spv::Dim::Dim1D, false, true, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, true, false, 2, format);
     case TextureType::Color2D:
-        return ctx.TypeImage(type, spv::Dim::Dim2D, false, false, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, false, false, 2, format);
     case TextureType::ColorArray2D:
-        return ctx.TypeImage(type, spv::Dim::Dim2D, false, true, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, true, false, 2, format);
     case TextureType::Color3D:
-        return ctx.TypeImage(type, spv::Dim::Dim3D, false, false, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim3D, false, false, false, 2, format);
     case TextureType::Buffer:
         throw NotImplementedException("Image buffer");
     default:
@@ -1266,7 +1265,8 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
             throw NotImplementedException("Array of image buffers");
         }
         const spv::ImageFormat format{GetImageFormat(desc.format)};
-        const Id image_type{TypeImage(U32[1], spv::Dim::Buffer, false, false, false, 2, format)};
+        const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
+        const Id image_type{TypeImage(sampled_type, spv::Dim::Buffer, false, false, false, 2, format)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
@@ -1276,6 +1276,7 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
             .id = id,
             .image_type = image_type,
             .count = desc.count,
+            .is_integer = desc.is_integer,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
@@ -1319,7 +1320,8 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
         if (desc.count != 1) {
             throw NotImplementedException("Array of images");
         }
-        const Id image_type{ImageType(*this, desc)};
+        const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
+        const Id image_type{ImageType(*this, desc, sampled_type)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
@@ -1329,6 +1331,7 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
             .id = id,
             .image_type = image_type,
             .count = desc.count,
+            .is_integer = desc.is_integer,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);

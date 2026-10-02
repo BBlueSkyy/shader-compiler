@@ -97,6 +97,7 @@ struct ImageBufferDescriptor {
     ImageFormat format;
     bool is_written;
     bool is_read;
+    bool is_integer;
     u32 cbuf_index;
     u32 cbuf_offset;
     u32 count;
@@ -128,6 +129,7 @@ struct ImageDescriptor {
     ImageFormat format;
     bool is_written;
     bool is_read;
+    bool is_integer;
     u32 cbuf_index;
     u32 cbuf_offset;
     u32 count;
