@@ -406,6 +406,14 @@ TexturePixelFormat ReadTexturePixelFormat(Environment& env, const ConstBufferAdd
     return env.ReadTexturePixelFormat(lhs_raw | rhs_raw);
 }
 
+bool IsTexturePixelFormatInteger(Environment& env, const ConstBufferAddr& cbuf) {
+    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
+    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
+    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset)};
+    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)};
+    return env.IsTexturePixelFormatInteger(lhs_raw | rhs_raw);
+}
+
 class Descriptors {
 public:
     explicit Descriptors(TextureBufferDescriptors& texture_buffer_descriptors_,
@@ -435,6 +443,7 @@ public:
         })};
         image_buffer_descriptors[index].is_written |= desc.is_written;
         image_buffer_descriptors[index].is_read |= desc.is_read;
+        image_buffer_descriptors[index].is_integer |= desc.is_integer;
         return index;
     }
 
@@ -459,6 +468,7 @@ public:
         })};
         image_descriptors[index].is_written |= desc.is_written;
         image_descriptors[index].is_read |= desc.is_read;
+        image_descriptors[index].is_integer |= desc.is_integer;
         return index;
     }
 
@@ -613,11 +623,13 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             }
             const bool is_written{inst->GetOpcode() != IR::Opcode::ImageRead};
             const bool is_read{inst->GetOpcode() != IR::Opcode::ImageWrite};
+            const bool is_integer{IsTexturePixelFormatInteger(env, cbuf)};
             if (flags.type == TextureType::Buffer) {
                 index = descriptors.Add(ImageBufferDescriptor{
                     .format = flags.image_format,
                     .is_written = is_written,
                     .is_read = is_read,
+                    .is_integer = is_integer,
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
                     .count = cbuf.count,
@@ -629,6 +641,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .format = flags.image_format,
                     .is_written = is_written,
                     .is_read = is_read,
+                    .is_integer = is_integer,
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
                     .count = cbuf.count,
