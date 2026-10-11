@@ -9,6 +9,8 @@
 
 #include <shader_compiler/common/common_types.h>
 #include <shader_compiler/frontend/ir/type.h>
+#include <shader_compiler/stage.h>
+#include <shader_compiler/storage_buffer_range.h>
 #include <shader_compiler/varying_state.h>
 
 #include <boost/container/small_vector.hpp>
@@ -74,9 +76,25 @@ struct StorageBufferDescriptor {
     u32 cbuf_offset;
     u32 count;
     bool is_written;
+    bool has_size{}; ///< NVN descriptor has address+size; a raw cbuf pointer has no size field.
+    ComputeStorageBufferAccessRange access_range{};
 
     auto operator<=>(const StorageBufferDescriptor&) const = default;
 };
+
+[[nodiscard]] constexpr bool IsNVNStorageBufferDescriptor(Stage stage, u32 index, u32 offset) {
+    u32 base{};
+    switch (stage) {
+    case Stage::VertexA:
+    case Stage::VertexB: base = 0x110; break;
+    case Stage::TessellationControl: base = 0x210; break;
+    case Stage::TessellationEval:
+    case Stage::Compute: base = 0x310; break;
+    case Stage::Geometry: base = 0x410; break;
+    case Stage::Fragment: base = 0x510; break;
+    }
+    return index == 0 && offset >= base && offset - base < 16 * 16 && (offset - base) % 16 == 0;
+}
 
 struct TextureBufferDescriptor {
     bool has_secondary;

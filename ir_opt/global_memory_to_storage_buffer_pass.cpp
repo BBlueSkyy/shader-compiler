@@ -281,6 +281,7 @@ bool MeetsBias(const StorageBufferAddr& storage_buffer, const Bias& bias) noexce
 struct LowAddrInfo {
     IR::U32 value;
     s32 imm_offset;
+    IR::U32 high;
 };
 
 /// Tries to track the first 32-bits of a global memory instruction
@@ -326,12 +327,14 @@ std::optional<LowAddrInfo> TrackLowAddress(IR::Inst* inst) {
     return LowAddrInfo{
         .value{IR::U32{addr_inst->Arg(0)}},
         .imm_offset = imm_offset,
+        .high{IR::U32{addr_inst->Arg(1)}},
     };
 }
 
 /// Tries to track the storage buffer address used by a global memory instruction
-std::optional<StorageBufferAddr> Track(const IR::Value& value, const Bias* bias) {
-    const auto pred{[bias](const IR::Inst* inst) -> std::optional<StorageBufferAddr> {
+std::optional<StorageBufferAddr> Track(const IR::Value& value, const IR::Value& high, const Bias* bias,
+                                     u32 pointer_alignment = 16) {
+    const auto pred{[bias, &high, pointer_alignment](const IR::Inst* inst) -> std::optional<StorageBufferAddr> {
         if (inst->GetOpcode() != IR::Opcode::GetCbufU32 &&
             inst->GetOpcode() != IR::Opcode::GetCbufU32x2) {
             return std::nullopt;
@@ -351,8 +354,8 @@ std::optional<StorageBufferAddr> Track(const IR::Value& value, const Bias* bias)
             .index = index.U32(),
             .offset = offset.U32(),
         };
-        if (!Common::IsAligned(storage_buffer.offset, 16)) {
-            // The SSBO pointer has to be aligned
+        if (!Common::IsAligned(storage_buffer.offset, bias ? 16 : pointer_alignment)) {
+            // NVN records are 16-byte aligned; standalone 64-bit pointers need only 8.
             return std::nullopt;
         }
         if (bias && !MeetsBias(storage_buffer, *bias)) {
@@ -360,9 +363,140 @@ std::optional<StorageBufferAddr> Track(const IR::Value& value, const Bias* bias)
             // point to them
             return std::nullopt;
         }
+        if (!bias && pointer_alignment == 8) {
+            // Preserve legacy 16-byte candidates, including low32-only pointers.
+            // A scalar offset can also be cbuf-aligned. Confirm the adjacent high
+            // word belongs to this pointer before admitting an unbiased candidate.
+            const auto high_word{BreadthFirstSearch(high, [&](const IR::Inst* candidate) -> std::optional<bool> {
+                const auto opcode{candidate->GetOpcode()};
+                if (opcode != IR::Opcode::GetCbufU32 && opcode != IR::Opcode::GetCbufU32x2)
+                    return std::nullopt;
+                if (!candidate->Arg(0).IsImmediate() || !candidate->Arg(1).IsImmediate())
+                    return std::nullopt;
+                const auto expected{storage_buffer.offset + (opcode == IR::Opcode::GetCbufU32 ? 4U : 0U)};
+                if (candidate->Arg(0).U32() == storage_buffer.index && candidate->Arg(1).U32() == expected)
+                    return true;
+                return std::nullopt;
+            })};
+            if (!high_word) return std::nullopt;
+        }
         return storage_buffer;
     }};
     return BreadthFirstSearch(value, pred);
+}
+
+// Infer a conservative affine offset, replacing only the selected pointer with zero.
+// Unrecognized expressions stay unknown; no guessed stride or game-specific layout.
+struct AffineOffsetRange : ComputeStorageBufferAccessRange {
+    u64 pointer_coefficient{};
+};
+
+std::optional<AffineOffsetRange> TrackOffsetRange(const IR::Value& value,
+                                                StorageBufferAddr pointer, u32& budget, u32 depth = 0) {
+    constexpr u64 limit{1ULL << 32};
+    if (depth > 64 || !budget) return std::nullopt;
+    --budget; // Shared SSA subtrees must not cause exponential traversal.
+    AffineOffsetRange result;
+    result.known = true;
+    if (value.IsImmediate()) {
+        if (value.Type() != IR::Type::U32) return std::nullopt;
+        result.constant = value.U32();
+        return result;
+    }
+    const IR::Inst* inst{value.InstRecursive()};
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetCbufU32:
+        if (!inst->Arg(0).IsImmediate() || !inst->Arg(1).IsImmediate()) return std::nullopt;
+        if (inst->Arg(0).U32() == pointer.index && inst->Arg(1).U32() == pointer.offset)
+            result.pointer_coefficient = 1;
+        else result.constant = limit - 1; // Other cbuf values are U32 parameters, not pointer bases.
+        return result;
+    case IR::Opcode::CompositeExtractU32x3: {
+        if (!inst->Arg(1).IsImmediate() || inst->Arg(0).IsImmediate()) return std::nullopt;
+        const auto axis{inst->Arg(1).U32()};
+        if (axis >= 3) return std::nullopt;
+        const auto vector_op{inst->Arg(0).InstRecursive()->GetOpcode()};
+        if (vector_op == IR::Opcode::WorkgroupId) result.workgroup[axis] = 1;
+        else if (vector_op == IR::Opcode::LocalInvocationId) result.local[axis] = 1;
+        else return std::nullopt;
+        return result;
+    }
+    case IR::Opcode::IAdd32:
+    case IR::Opcode::IMul32:
+    case IR::Opcode::ShiftLeftLogical32: {
+        auto lhs{TrackOffsetRange(inst->Arg(0), pointer, budget, depth + 1)};
+        if (!lhs) return std::nullopt;
+        std::optional<AffineOffsetRange> rhs;
+        if (inst->GetOpcode() == IR::Opcode::ShiftLeftLogical32) {
+            if (!inst->Arg(1).IsImmediate() || inst->Arg(1).U32() >= 32) return std::nullopt;
+            rhs = AffineOffsetRange{};
+            rhs->known = true;
+            rhs->constant = 1ULL << inst->Arg(1).U32();
+        } else {
+            rhs = TrackOffsetRange(inst->Arg(1), pointer, budget, depth + 1);
+        }
+        if (!rhs) return std::nullopt;
+        auto has_axes = [](const ComputeStorageBufferAccessRange& range) {
+            for (size_t axis{}; axis < 3; ++axis)
+                if (range.workgroup[axis] || range.local[axis]) return true;
+            return false;
+        };
+        if (inst->GetOpcode() != IR::Opcode::IAdd32) {
+            if (has_axes(*rhs) || rhs->pointer_coefficient) std::swap(lhs, rhs);
+            if (has_axes(*rhs) || rhs->pointer_coefficient) return std::nullopt; // Not an affine product.
+            const u64 factor{rhs->constant};
+            auto mul = [factor](u64 x) { return factor && x > limit / factor ? limit : x * factor; };
+            lhs->constant = mul(lhs->constant);
+            lhs->pointer_coefficient = mul(lhs->pointer_coefficient);
+            for (size_t axis{}; axis < 3; ++axis) {
+                lhs->workgroup[axis] = mul(lhs->workgroup[axis]);
+                lhs->local[axis] = mul(lhs->local[axis]);
+            }
+        } else {
+            lhs->constant = (std::min)(limit, lhs->constant + rhs->constant);
+            lhs->pointer_coefficient = (std::min)(limit, lhs->pointer_coefficient + rhs->pointer_coefficient);
+            for (size_t axis{}; axis < 3; ++axis) {
+                lhs->workgroup[axis] = (std::min)(limit, lhs->workgroup[axis] + rhs->workgroup[axis]);
+                lhs->local[axis] = (std::min)(limit, lhs->local[axis] + rhs->local[axis]);
+            }
+        }
+        return lhs;
+    }
+    default: return std::nullopt;
+    }
+}
+
+u32 GlobalAccessWidth(IR::Opcode opcode) {
+    switch (opcode) {
+    case IR::Opcode::LoadGlobalU8: case IR::Opcode::LoadGlobalS8:
+    case IR::Opcode::WriteGlobalU8: case IR::Opcode::WriteGlobalS8: return 1;
+    case IR::Opcode::LoadGlobalU16: case IR::Opcode::LoadGlobalS16:
+    case IR::Opcode::WriteGlobalU16: case IR::Opcode::WriteGlobalS16: return 2;
+    case IR::Opcode::LoadGlobal128: case IR::Opcode::WriteGlobal128: return 16;
+    case IR::Opcode::LoadGlobal32: case IR::Opcode::WriteGlobal32: return 4;
+    case IR::Opcode::LoadGlobal64: case IR::Opcode::WriteGlobal64: return 8;
+    default: return 0; // Atomics retain the generic unknown-size fallback.
+    }
+}
+
+ComputeStorageBufferAccessRange CollectAccessRange(StorageBufferAddr pointer, const StorageInfo& info) {
+    ComputeStorageBufferAccessRange result{.known = true};
+    for (const auto& access : info.to_replace) {
+        if (access.storage_buffer != pointer) continue;
+        const auto low{TrackLowAddress(access.inst)};
+        const auto width{GlobalAccessWidth(access.inst->GetOpcode())};
+        if (!low || low->imm_offset < 0 || !width) return {};
+        u32 budget{512};
+        auto range{TrackOffsetRange(low->value, pointer, budget)};
+        if (!range || range->pointer_coefficient != 1) return {};
+        range->constant += static_cast<u32>(low->imm_offset) + width;
+        result.constant = (std::max)(result.constant, range->constant);
+        for (size_t axis{}; axis < 3; ++axis) {
+            result.workgroup[axis] = (std::max)(result.workgroup[axis], range->workgroup[axis]);
+            result.local[axis] = (std::max)(result.local[axis], range->local[axis]);
+        }
+    }
+    return result;
 }
 
 /// Collects the storage buffer used by a global memory instruction and the instruction itself
@@ -382,13 +516,15 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info) 
     }
     // First try to find storage buffers in the NVN address
     const IR::U32 low_addr{low_addr_info->value};
-    std::optional<StorageBufferAddr> storage_buffer{Track(low_addr, &nvn_bias)};
+    std::optional<StorageBufferAddr> storage_buffer{Track(low_addr, low_addr_info->high, &nvn_bias)};
     if (!storage_buffer) {
         // If it fails, track without a bias
-        storage_buffer = Track(low_addr, nullptr);
+        storage_buffer = Track(low_addr, low_addr_info->high, nullptr);
         if (!storage_buffer) {
-            // If that also fails, use NVN fallbacks
-            return;
+            // Preserve preference for existing 16-byte candidates. Admit 8-byte
+            // pointers only after their adjacent high word has been confirmed.
+            storage_buffer = Track(low_addr, low_addr_info->high, nullptr, 8);
+            if (!storage_buffer) return;
         }
     }
     // Collect storage buffer and the instruction
@@ -531,6 +667,9 @@ void GlobalMemoryToStorageBufferPass(IR::Program& program, const HostTranslateIn
             .cbuf_offset = storage_buffer.offset,
             .count = 1,
             .is_written = info.writes.contains(storage_buffer),
+            .has_size = IsNVNStorageBufferDescriptor(program.stage, storage_buffer.index, storage_buffer.offset),
+            .access_range = program.stage == Stage::Compute ? CollectAccessRange(storage_buffer, info)
+                                                          : ComputeStorageBufferAccessRange{},
         });
     }
     for (const StorageInst& storage_inst : info.to_replace) {

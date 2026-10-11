@@ -126,6 +126,7 @@ void AddNVNStorageBuffers(IR::Program& program) {
             .cbuf_offset = offset,
             .count = 1,
             .is_written = program.info.stores_global_memory,
+            .has_size = true,
         });
     }
 }
