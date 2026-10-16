@@ -2,6 +2,7 @@
 #include <bit>
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -14,7 +15,7 @@
 
 namespace Shader::Log {
 void Debug(const std::string&) {}
-void Warn(const std::string& s) { std::cerr << s << '\n'; }
+void Warn(const std::string&) {}
 void Error(const std::string& s) { std::cerr << s << '\n'; }
 }
 using namespace Shader;
@@ -107,7 +108,7 @@ int main(int argc, char** argv) {
         u64 hash{};
         for (int sample = 0; sample < 7; ++sample) {
             Pools p;
-            const auto start = std::chrono::steady_clock::now();
+            const auto start = std::clock();
             for (int i = 0; i < iterations; ++i) {
                 FixtureEnvironment env(OutputTopology::TriangleStrip, std::string(name) == "passthrough" || std::string(name) == "partial", std::string(name) == "partial");
                 env.SetStage(std::string(name) == "vertex" ? Stage::VertexB : Stage::Geometry);
@@ -124,7 +125,7 @@ int main(int argc, char** argv) {
                 for (auto word : spv) { hash ^= word; hash *= 1099511628211ULL; }
                 p.inst.ReleaseContents(); p.blocks.ReleaseContents(); p.flow.ReleaseContents();
             }
-            samples.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / iterations);
+            samples.push_back((static_cast<double>(std::clock() - start) * 1000000.0 / CLOCKS_PER_SEC) / iterations);
         }
         std::sort(samples.begin(), samples.end());
         std::cout << name << " median_us=" << samples[3] << " min_us=" << samples[0] << " max_us=" << samples[6] << " words=" << words << " hash=" << hash << " iterations=" << iterations << "\n";

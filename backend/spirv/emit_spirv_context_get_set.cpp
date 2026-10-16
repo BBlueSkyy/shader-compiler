@@ -433,7 +433,7 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, Id) {
 // outputs are per primitive, so keep their computed values in SSA across emits.
 std::vector<std::pair<Id, Id>> EmitContext::SavePassthroughOutputs() {
     std::vector<std::pair<Id, Id>> saved;
-    if (!emulated_geometry_passthrough) return saved;
+    if (!emulated_geometry_passthrough || passthrough_preserve.mask.none()) return saved;
     for (u32 index = 0; index < passthrough_preserve.mask.size(); ++index) {
         if (!passthrough_preserve.mask[index]) continue;
         const auto attr{static_cast<IR::Attribute>(index)};

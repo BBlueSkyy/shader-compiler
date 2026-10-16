@@ -184,6 +184,7 @@ void EmitGeometryPassthrough(IR::IREmitter& ir, const IR::Program& program,
         // components computed once per primitive by the guest geometry shader.
         for (u32 j = 0; j < 256; ++j) {
             const auto attr{static_cast<IR::Attribute>(j)};
+            if (!passthrough_mask[attr]) continue;
             const bool position{attr >= IR::Attribute::PositionX && attr <= IR::Attribute::PositionW};
             const bool per_vertex{IR::IsGeneric(attr) || IsLegacyAttribute(attr) ||
                 attr == IR::Attribute::PointSize ||
