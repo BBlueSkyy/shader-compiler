@@ -300,7 +300,7 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
                 ctx.AddExtension("SPV_NV_geometry_shader_passthrough");
                 ctx.AddCapability(spv::Capability::GeometryShaderPassthroughNV);
             } else {
-                LOG_WARNING(Shader_SPIRV, "Geometry shader passthrough used with no support");
+                throw NotImplementedException("Native geometry passthrough reached a backend without support");
             }
         }
         break;

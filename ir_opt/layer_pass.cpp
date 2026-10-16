@@ -1,29 +1,21 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
-#include <bit>
-#include <optional>
-
-#include <boost/container/small_vector.hpp>
-
-#include <shader_compiler/environment.h>
-#include <shader_compiler/frontend/ir/basic_block.h>
-#include <shader_compiler/frontend/ir/breadth_first_search.h>
-#include <shader_compiler/frontend/ir/ir_emitter.h>
+#include <shader_compiler/exception.h>
+#include <shader_compiler/frontend/ir/program.h>
 #include <shader_compiler/host_translate_info.h>
 #include <shader_compiler/ir_opt/passes.h>
 #include <shader_compiler/shader_info.h>
 
 namespace Shader::Optimization {
 
-static IR::Attribute EmulatedLayerAttribute(VaryingState& stores) {
-    for (u32 i = 0; i < 32; i++) {
+static IR::Attribute EmulatedPrimitiveAttribute(const VaryingState& stores) {
+    for (u32 i = 0; i < IR::NUM_GENERICS; i++) {
         if (!stores.Generic(i)) {
             return IR::Attribute::Generic0X + (i * 4);
         }
     }
-    return IR::Attribute::Layer;
+    throw RuntimeError("No free varying for primitive output emulation");
 }
 
 static bool PermittedProgramStage(Stage stage) {
@@ -43,25 +35,35 @@ void LayerPass(IR::Program& program, const HostTranslateInfo& host_info) {
         return;
     }
 
-    const auto end{program.post_order_blocks.end()};
-    const auto layer_attribute = EmulatedLayerAttribute(program.info.stores);
-    bool requires_layer_emulation = false;
-
-    for (auto block = program.post_order_blocks.begin(); block != end; ++block) {
-        for (IR::Inst& inst : (*block)->Instructions()) {
-            if (inst.GetOpcode() == IR::Opcode::SetAttribute &&
-                inst.Arg(0).Attribute() == IR::Attribute::Layer) {
-                requires_layer_emulation = true;
-                inst.SetArg(0, IR::Value{layer_attribute});
+    Info& info = program.info;
+    for (IR::Block* const block : program.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() != IR::Opcode::SetAttribute) {
+                continue;
             }
+            const auto builtin = inst.Arg(0).Attribute();
+            bool* required;
+            IR::Attribute* target;
+            switch (builtin) {
+            case IR::Attribute::Layer:
+                required = &info.requires_layer_emulation;
+                target = &info.emulated_layer;
+                break;
+            case IR::Attribute::ViewportIndex:
+                required = &info.requires_viewport_index_emulation;
+                target = &info.emulated_viewport_index;
+                break;
+            default:
+                continue;
+            }
+            if (!*required) {
+                *target = EmulatedPrimitiveAttribute(info.stores);
+                info.stores.Set(*target);
+                *required = true;
+            }
+            info.stores.Set(builtin, false);
+            inst.SetArg(0, IR::Value{*target});
         }
-    }
-
-    if (requires_layer_emulation) {
-        program.info.requires_layer_emulation = true;
-        program.info.emulated_layer = layer_attribute;
-        program.info.stores.Set(IR::Attribute::Layer, false);
-        program.info.stores.Set(layer_attribute, true);
     }
 }
 

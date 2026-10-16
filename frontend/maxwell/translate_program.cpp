@@ -126,6 +126,7 @@ void AddNVNStorageBuffers(IR::Program& program) {
             .cbuf_offset = offset,
             .count = 1,
             .is_written = program.info.stores_global_memory,
+            .has_size = true,
         });
     }
 }
@@ -176,34 +177,42 @@ std::map<IR::Attribute, IR::Attribute> GenerateLegacyToGenericMappings(
 void EmitGeometryPassthrough(IR::IREmitter& ir, const IR::Program& program,
                              const Shader::VaryingState& passthrough_mask,
                              bool passthrough_position,
-                             std::optional<IR::Attribute> passthrough_layer_attr) {
+                             std::optional<IR::Attribute> passthrough_layer_attr,
+                             std::optional<IR::Attribute> passthrough_viewport_attr = {}) {
     for (u32 i = 0; i < program.output_vertices; i++) {
-        // Assign generics from input
-        for (u32 j = 0; j < 32; j++) {
-            if (!passthrough_mask.Generic(j)) {
-                continue;
+        // Skip bits are per component. A partially passed vec4 must not overwrite
+        // components computed once per primitive by the guest geometry shader.
+        for (u32 j = 0; j < 256; ++j) {
+            const auto attr{static_cast<IR::Attribute>(j)};
+            const bool position{attr >= IR::Attribute::PositionX && attr <= IR::Attribute::PositionW};
+            const bool per_vertex{IR::IsGeneric(attr) || IsLegacyAttribute(attr) ||
+                attr == IR::Attribute::PointSize ||
+                (attr >= IR::Attribute::ClipDistance0 && attr <= IR::Attribute::ClipDistance7)};
+            const bool primitive{program.was_geometry_passthrough &&
+                (attr == IR::Attribute::PrimitiveId || attr == IR::Attribute::Layer || attr == IR::Attribute::ViewportIndex)};
+            if ((position && passthrough_position && passthrough_mask[attr]) ||
+                ((per_vertex || primitive) && passthrough_mask[attr])) {
+                // Layer/ViewportIndex are primitive values; the pipeline linker
+                // carries them through an ordinary varying from vertex zero.
+                auto value{ir.GetAttribute(attr, ir.Imm32(primitive ? 0 : i))};
+                // Mark generated per-vertex loads so only these can be remapped
+                // to the central vertices of an adjacency primitive at emission.
+                value.Inst()->SetFlags<u32>(1);
+                ir.SetAttribute(attr, value, ir.Imm32(0));
             }
-
-            const IR::Attribute attr = IR::Attribute::Generic0X + (j * 4);
-            ir.SetAttribute(attr + 0, ir.GetAttribute(attr + 0, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 1, ir.GetAttribute(attr + 1, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 2, ir.GetAttribute(attr + 2, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 3, ir.GetAttribute(attr + 3, ir.Imm32(i)), ir.Imm32(0));
-        }
-
-        if (passthrough_position) {
-            // Assign position from input
-            const IR::Attribute attr = IR::Attribute::PositionX;
-            ir.SetAttribute(attr + 0, ir.GetAttribute(attr + 0, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 1, ir.GetAttribute(attr + 1, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 2, ir.GetAttribute(attr + 2, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 3, ir.GetAttribute(attr + 3, ir.Imm32(i)), ir.Imm32(0));
         }
 
         if (passthrough_layer_attr) {
             // Assign layer
-            ir.SetAttribute(IR::Attribute::Layer, ir.GetAttribute(*passthrough_layer_attr),
-                            ir.Imm32(0));
+            auto value{ir.GetAttribute(*passthrough_layer_attr)};
+            value.Inst()->SetFlags<u32>(1);
+            ir.SetAttribute(IR::Attribute::Layer, value, ir.Imm32(0));
+        }
+
+        if (passthrough_viewport_attr) {
+            auto value{ir.GetAttribute(*passthrough_viewport_attr)};
+            value.Inst()->SetFlags<u32>(1);
+            ir.SetAttribute(IR::Attribute::ViewportIndex, value, ir.Imm32(0));
         }
 
         // Emit vertex
@@ -223,7 +232,7 @@ u32 GetOutputTopologyVertices(OutputTopology output_topology) {
     }
 }
 
-void LowerGeometryPassthrough(const IR::Program& program, const HostTranslateInfo& host_info) {
+void LowerGeometryPassthrough(IR::Program& program) {
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             if (inst.GetOpcode() == IR::Opcode::Epilogue) {
@@ -234,6 +243,33 @@ void LowerGeometryPassthrough(const IR::Program& program, const HostTranslateInf
             }
         }
     }
+    program.is_geometry_passthrough = false;
+}
+
+// Native passthrough decorates whole interface variables. Mixed component masks
+// and primitive builtin inputs need the existing explicit vertex lowering.
+bool CanUseNativePassthrough(const IR::Program& program) {
+    const auto& pass{program.info.passthrough};
+    if (program.invocations != 1 || pass[IR::Attribute::PrimitiveId] || pass[IR::Attribute::Layer] || pass[IR::Attribute::ViewportIndex] ||
+        pass.Legacy() || !pass.AllComponents(IR::Attribute::PositionX)) return false;
+    // Passthrough decoration applies to the entire clip-distance array.
+    for (u32 c = 1; c < 8; ++c) {
+        if (pass[IR::Attribute::ClipDistance0 + c] != pass[IR::Attribute::ClipDistance0]) return false;
+    }
+    // The predecessor owns host position conversion on the native path. Guest
+    // position calculations must instead observe the original guest coordinates.
+    for (auto* block : program.blocks) {
+        for (const auto& inst : *block) {
+            if (inst.GetOpcode() == IR::Opcode::GetAttributeIndexed || inst.GetOpcode() == IR::Opcode::SetAttributeIndexed) return false;
+            if (inst.GetOpcode() != IR::Opcode::GetAttribute && inst.GetOpcode() != IR::Opcode::SetAttribute) continue;
+            const auto attr{inst.Arg(0).Attribute()};
+            if (attr >= IR::Attribute::PositionX && attr <= IR::Attribute::PositionW) return false;
+        }
+    }
+    for (u32 index = 0; index < IR::NUM_GENERICS; ++index) {
+        if (!pass.IsUniform(IR::Attribute::Generic0X + index * 4)) return false;
+    }
+    return true;
 }
 
 } // Anonymous namespace
@@ -257,16 +293,19 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
         program.output_topology = sph.common3.output_topology;
         program.output_vertices = sph.common4.max_output_vertices;
         program.invocations = sph.common2.threads_per_input_primitive;
-        program.is_geometry_passthrough = sph.common0.geometry_passthrough != 0;
+        program.was_geometry_passthrough = sph.common0.geometry_passthrough != 0;
+        program.is_geometry_passthrough = program.was_geometry_passthrough;
         if (program.is_geometry_passthrough) {
             const auto& mask{env.GpPassthroughMask()};
             for (size_t i = 0; i < mask.size() * 32; ++i) {
                 program.info.passthrough.mask[i] = ((mask[i / 32] >> (i % 32)) & 1) == 0;
             }
 
-            if (!host_info.support_geometry_shader_passthrough) {
-                program.output_vertices = GetOutputTopologyVertices(program.output_topology);
-                LowerGeometryPassthrough(program, host_info);
+            // Passthrough always produces the input primitive, independent of
+            // the guest header's (often zero) conventional GS vertex limit.
+            program.output_vertices = GetOutputTopologyVertices(program.output_topology);
+            if (!host_info.support_geometry_shader_passthrough || !CanUseNativePassthrough(program)) {
+                LowerGeometryPassthrough(program);
             }
         }
         break;
@@ -362,6 +401,8 @@ void ConvertLegacyToGeneric(IR::Program& program, const Shader::RuntimeInfo& run
                     const auto attr = inst.Arg(0).Attribute();
                     if (IsLegacyAttribute(attr)) {
                         stores.Set(program.info.legacy_stores_mapping[attr], true);
+                        if (program.info.passthrough[attr])
+                            program.info.passthrough.Set(program.info.legacy_stores_mapping[attr]);
                         inst.SetArg(0, Shader::IR::Value(program.info.legacy_stores_mapping[attr]));
                     }
                     break;
@@ -418,8 +459,22 @@ IR::Program GenerateGeometryPassthrough(ObjectPool<IR::Inst>& inst_pool,
     program.is_geometry_passthrough = false;
     program.info.loads.mask = source_program.info.stores.mask;
     program.info.stores.mask = source_program.info.stores.mask;
-    program.info.stores.Set(IR::Attribute::Layer, true);
-    program.info.stores.Set(source_program.info.emulated_layer, false);
+    for (u32 c = 0; c < 4; ++c) {
+        program.info.loads.Set(IR::Attribute::PositionX + c);
+        program.info.stores.Set(IR::Attribute::PositionX + c);
+    }
+    const auto layer_attr{source_program.info.requires_layer_emulation
+        ? std::optional{source_program.info.emulated_layer} : std::nullopt};
+    const auto viewport_attr{source_program.info.requires_viewport_index_emulation
+        ? std::optional{source_program.info.emulated_viewport_index} : std::nullopt};
+    if (layer_attr) {
+        program.info.stores.Set(IR::Attribute::Layer);
+        program.info.stores.Set(*layer_attr, false);
+    }
+    if (viewport_attr) {
+        program.info.stores.Set(IR::Attribute::ViewportIndex);
+        program.info.stores.Set(*viewport_attr, false);
+    }
 
     IR::Block* current_block = block_pool.Create(inst_pool);
     auto& node{program.syntax_list.emplace_back()};
@@ -428,7 +483,7 @@ IR::Program GenerateGeometryPassthrough(ObjectPool<IR::Inst>& inst_pool,
 
     IR::IREmitter ir{*current_block};
     EmitGeometryPassthrough(ir, program, program.info.stores, true,
-                            source_program.info.emulated_layer);
+                            layer_attr, viewport_attr);
 
     IR::Block* return_block{block_pool.Create(inst_pool)};
     IR::IREmitter{*return_block}.Epilogue();

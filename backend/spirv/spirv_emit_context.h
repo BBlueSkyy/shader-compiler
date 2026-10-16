@@ -46,12 +46,14 @@ struct ImageBufferDefinition {
     Id id;
     Id image_type;
     u32 count;
+    bool is_integer;
 };
 
 struct ImageDefinition {
     Id id;
     Id image_type;
     u32 count;
+    bool is_integer;
 };
 
 struct UniformDefinitions {
@@ -166,6 +168,10 @@ public:
     const Profile& profile;
     const RuntimeInfo& runtime_info;
     Stage stage{};
+    bool emulated_geometry_passthrough{};
+    VaryingState passthrough_preserve;
+    // Only populated for lowered passthrough, during shader compilation.
+    std::vector<std::pair<Id, Id>> SavePassthroughOutputs();
 
     Id void_id{};
     Id U1{};
@@ -197,6 +203,8 @@ public:
     Id shared_u32x2{};
     Id shared_u32x4{};
 
+    Id output_primitive_id{};
+    Id input_point_size{};
     Id input_f32{};
     Id input_u32{};
     Id input_s32{};
@@ -237,6 +245,7 @@ public:
     Id front_face{};
     Id point_coord{};
     Id tess_coord{};
+    Id input_clip_distances{};
     Id clip_distances{};
     Id layer{};
     Id viewport_index{};

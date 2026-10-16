@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 3.16)
+project(shader_geometry_regression LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DFMT_CONSTEVAL=")
+get_filename_component(LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+set(STRATO_LIBRARIES "${LIBRARIES}" CACHE PATH "Strato libraries containing fmt, sirit, range, robin-map")
+find_path(BOOST_INCLUDE_DIR boost/container/small_vector.hpp REQUIRED)
+include_directories(SYSTEM "${BOOST_INCLUDE_DIR}" "${STRATO_LIBRARIES}/range/include" "${STRATO_LIBRARIES}/robin-map/include")
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/../include")
+add_subdirectory("${STRATO_LIBRARIES}/fmt" fmt EXCLUDE_FROM_ALL)
+add_subdirectory("${STRATO_LIBRARIES}/sirit" sirit EXCLUDE_FROM_ALL)
+add_subdirectory(.. compiler EXCLUDE_FROM_ALL)
+# The Android compiler is Clang; GCC diagnoses the existing bit-field sign
+# extension helper as a conversion even when the field has the same width.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(shader_recompiler PRIVATE -Wno-error=conversion -Wno-conversion)
+endif()
+target_compile_options(shader_recompiler PRIVATE -include cstddef)
+add_executable(geometry_tests geometry.cpp passthrough_link.cpp layer_pass.cpp review_geometry.cpp)
+
+target_link_libraries(geometry_tests PRIVATE shader_recompiler)
+enable_testing()
+add_test(NAME geometry COMMAND geometry_tests "${CMAKE_CURRENT_BINARY_DIR}/modules")
+
+add_executable(geometry_benchmark benchmark.cpp)
+target_link_libraries(geometry_benchmark PRIVATE shader_recompiler)

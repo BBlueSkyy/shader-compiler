@@ -73,20 +73,19 @@ spv::ImageFormat GetImageFormat(ImageFormat format) {
     throw InvalidArgument("Invalid image format {}", format);
 }
 
-Id ImageType(EmitContext& ctx, const ImageDescriptor& desc) {
+Id ImageType(EmitContext& ctx, const ImageDescriptor& desc, Id sampled_type) {
     const spv::ImageFormat format{GetImageFormat(desc.format)};
-    const Id type{ctx.U32[1]};
     switch (desc.type) {
     case TextureType::Color1D:
-        return ctx.TypeImage(type, spv::Dim::Dim1D, false, false, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, false, false, 2, format);
     case TextureType::ColorArray1D:
-        return ctx.TypeImage(type, spv::Dim::Dim1D, false, true, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, true, false, 2, format);
     case TextureType::Color2D:
-        return ctx.TypeImage(type, spv::Dim::Dim2D, false, false, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, false, false, 2, format);
     case TextureType::ColorArray2D:
-        return ctx.TypeImage(type, spv::Dim::Dim2D, false, true, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, true, false, 2, format);
     case TextureType::Color3D:
-        return ctx.TypeImage(type, spv::Dim::Dim3D, false, false, false, 2, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim3D, false, false, false, 2, format);
     case TextureType::Buffer:
         throw NotImplementedException("Image buffer");
     default:
@@ -455,6 +454,10 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     : Sirit::Module(profile_.supported_spirv), profile{profile_}, runtime_info{runtime_info_},
       stage{program.stage}, texture_rescaling_index{bindings.texture_scaling_index},
       image_rescaling_index{bindings.image_scaling_index} {
+    emulated_geometry_passthrough = program.was_geometry_passthrough && !program.is_geometry_passthrough;
+    if (emulated_geometry_passthrough) {
+        passthrough_preserve.mask = program.info.stores.mask & ~program.info.passthrough.mask;
+    }
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
@@ -1266,7 +1269,8 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
             throw NotImplementedException("Array of image buffers");
         }
         const spv::ImageFormat format{GetImageFormat(desc.format)};
-        const Id image_type{TypeImage(U32[1], spv::Dim::Buffer, false, false, false, 2, format)};
+        const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
+        const Id image_type{TypeImage(sampled_type, spv::Dim::Buffer, false, false, false, 2, format)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
@@ -1276,6 +1280,7 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
             .id = id,
             .image_type = image_type,
             .count = desc.count,
+            .is_integer = desc.is_integer,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
@@ -1319,7 +1324,8 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
         if (desc.count != 1) {
             throw NotImplementedException("Array of images");
         }
-        const Id image_type{ImageType(*this, desc)};
+        const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
+        const Id image_type{ImageType(*this, desc, sampled_type)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
@@ -1329,6 +1335,7 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
             .id = id,
             .image_type = image_type,
             .count = desc.count,
+            .is_integer = desc.is_integer,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
@@ -1392,6 +1399,11 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         layer = DefineInput(*this, U32[1], false, spv::BuiltIn::Layer);
         Decorate(layer, spv::Decoration::Flat);
     }
+    if (loads[IR::Attribute::PointSize]) {
+        input_point_size = DefineInput(*this, F32[1], true, spv::BuiltIn::PointSize);
+        if (program.is_geometry_passthrough && profile.support_geometry_shader_passthrough && info.passthrough[IR::Attribute::PointSize])
+            Decorate(input_point_size, spv::Decoration::PassthroughNV);
+    }
     if (loads.AnyComponent(IR::Attribute::PositionX)) {
         const bool is_fragment{stage == Stage::Fragment};
         if (!is_fragment && profile.has_broken_spirv_position_input) {
@@ -1408,11 +1420,10 @@ void EmitContext::DefineInputs(const IR::Program& program) {
                                                     : spv::BuiltIn::Position};
             input_position = DefineInput(*this, F32[4], true, built_in);
 
-            if (profile.support_geometry_shader_passthrough) {
-                if (info.passthrough.AnyComponent(IR::Attribute::PositionX)) {
-                    Decorate(input_position, spv::Decoration::PassthroughNV);
-                }
-            }
+        }
+        if (program.is_geometry_passthrough && profile.support_geometry_shader_passthrough &&
+            info.passthrough.AnyComponent(IR::Attribute::PositionX)) {
+            Decorate(input_position, spv::Decoration::PassthroughNV);
         }
     }
     if (loads[IR::Attribute::InstanceId]) {
@@ -1454,6 +1465,12 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         loads[IR::Attribute::TessellationEvaluationPointV]) {
         tess_coord = DefineInput(*this, F32[3], false, spv::BuiltIn::TessCoord);
     }
+    if (loads.ClipDistances()) {
+        const Id type{TypeArray(F32[1], Const(8U))};
+        input_clip_distances = DefineInput(*this, type, true, spv::BuiltIn::ClipDistance);
+        if (program.is_geometry_passthrough && profile.support_geometry_shader_passthrough && info.passthrough.ClipDistances())
+            Decorate(input_clip_distances, spv::Decoration::PassthroughNV);
+    }
     for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
         const AttributeType input_type{runtime_info.generic_input_types[index]};
         if (!runtime_info.previous_stage_stores.Generic(index)) {
@@ -1471,7 +1488,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         Name(id, fmt::format("in_attr{}", index));
         input_generics[index] = GetAttributeInfo(*this, input_type, id);
 
-        if (info.passthrough.Generic(index) && profile.support_geometry_shader_passthrough) {
+        if (program.is_geometry_passthrough && info.passthrough.Generic(index) && profile.support_geometry_shader_passthrough) {
             Decorate(id, spv::Decoration::PassthroughNV);
         }
         if (stage != Stage::Fragment) {
@@ -1522,6 +1539,9 @@ void EmitContext::DefineOutputs(const IR::Program& program) {
         }
         const Id type{TypeArray(F32[1], Const(8U))};
         clip_distances = DefineOutput(*this, type, invocations, spv::BuiltIn::ClipDistance);
+    }
+    if (info.stores[IR::Attribute::PrimitiveId]) {
+        output_primitive_id = DefineOutput(*this, U32[1], invocations, spv::BuiltIn::PrimitiveId);
     }
     if (info.stores[IR::Attribute::Layer] &&
         (profile.support_viewport_index_layer_non_geometry || stage == Stage::Geometry)) {
