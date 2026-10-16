@@ -212,6 +212,8 @@ add_library(shader_recompiler STATIC
     frontend/maxwell/translate/impl/warp_shuffle.cpp
     frontend/maxwell/translate/translate.cpp
     frontend/maxwell/translate/translate.h
+    frontend/maxwell/geometry_passthrough_link.cpp
+    frontend/maxwell/geometry_passthrough_link.h
     frontend/maxwell/translate_program.cpp
     frontend/maxwell/translate_program.h
     host_translate_info.h

@@ -454,6 +454,10 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     : Sirit::Module(profile_.supported_spirv), profile{profile_}, runtime_info{runtime_info_},
       stage{program.stage}, texture_rescaling_index{bindings.texture_scaling_index},
       image_rescaling_index{bindings.image_scaling_index} {
+    emulated_geometry_passthrough = program.was_geometry_passthrough && !program.is_geometry_passthrough;
+    if (emulated_geometry_passthrough) {
+        passthrough_preserve.mask = program.info.stores.mask & ~program.info.passthrough.mask;
+    }
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
@@ -1395,6 +1399,11 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         layer = DefineInput(*this, U32[1], false, spv::BuiltIn::Layer);
         Decorate(layer, spv::Decoration::Flat);
     }
+    if (loads[IR::Attribute::PointSize]) {
+        input_point_size = DefineInput(*this, F32[1], true, spv::BuiltIn::PointSize);
+        if (program.is_geometry_passthrough && profile.support_geometry_shader_passthrough && info.passthrough[IR::Attribute::PointSize])
+            Decorate(input_point_size, spv::Decoration::PassthroughNV);
+    }
     if (loads.AnyComponent(IR::Attribute::PositionX)) {
         const bool is_fragment{stage == Stage::Fragment};
         if (!is_fragment && profile.has_broken_spirv_position_input) {
@@ -1411,11 +1420,10 @@ void EmitContext::DefineInputs(const IR::Program& program) {
                                                     : spv::BuiltIn::Position};
             input_position = DefineInput(*this, F32[4], true, built_in);
 
-            if (profile.support_geometry_shader_passthrough) {
-                if (info.passthrough.AnyComponent(IR::Attribute::PositionX)) {
-                    Decorate(input_position, spv::Decoration::PassthroughNV);
-                }
-            }
+        }
+        if (program.is_geometry_passthrough && profile.support_geometry_shader_passthrough &&
+            info.passthrough.AnyComponent(IR::Attribute::PositionX)) {
+            Decorate(input_position, spv::Decoration::PassthroughNV);
         }
     }
     if (loads[IR::Attribute::InstanceId]) {
@@ -1460,6 +1468,8 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     if (loads.ClipDistances()) {
         const Id type{TypeArray(F32[1], Const(8U))};
         input_clip_distances = DefineInput(*this, type, true, spv::BuiltIn::ClipDistance);
+        if (program.is_geometry_passthrough && profile.support_geometry_shader_passthrough && info.passthrough.ClipDistances())
+            Decorate(input_clip_distances, spv::Decoration::PassthroughNV);
     }
     for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
         const AttributeType input_type{runtime_info.generic_input_types[index]};
@@ -1478,7 +1488,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         Name(id, fmt::format("in_attr{}", index));
         input_generics[index] = GetAttributeInfo(*this, input_type, id);
 
-        if (info.passthrough.Generic(index) && profile.support_geometry_shader_passthrough) {
+        if (program.is_geometry_passthrough && info.passthrough.Generic(index) && profile.support_geometry_shader_passthrough) {
             Decorate(id, spv::Decoration::PassthroughNV);
         }
         if (stage != Stage::Fragment) {
@@ -1529,6 +1539,9 @@ void EmitContext::DefineOutputs(const IR::Program& program) {
         }
         const Id type{TypeArray(F32[1], Const(8U))};
         clip_distances = DefineOutput(*this, type, invocations, spv::BuiltIn::ClipDistance);
+    }
+    if (info.stores[IR::Attribute::PrimitiveId]) {
+        output_primitive_id = DefineOutput(*this, U32[1], invocations, spv::BuiltIn::PrimitiveId);
     }
     if (info.stores[IR::Attribute::Layer] &&
         (profile.support_viewport_index_layer_non_geometry || stage == Stage::Geometry)) {

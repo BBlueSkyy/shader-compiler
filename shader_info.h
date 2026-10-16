@@ -244,6 +244,8 @@ struct Info {
 
     bool requires_layer_emulation{};
     IR::Attribute emulated_layer{};
+    bool requires_viewport_index_emulation{};
+    IR::Attribute emulated_viewport_index{};
 
     boost::container::static_vector<ConstantBufferDescriptor, MAX_CBUFS>
         constant_buffer_descriptors;

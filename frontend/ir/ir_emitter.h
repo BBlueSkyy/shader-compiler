@@ -72,6 +72,8 @@ public:
     [[nodiscard]] U1 Condition(IR::Condition cond);
     [[nodiscard]] U1 GetFlowTestResult(FlowTest test);
 
+    // GetAttribute flags bit 0 marks a generated passthrough per-vertex load.
+    // Backends may remap its vertex for adjacency without changing guest reads.
     [[nodiscard]] F32 GetAttribute(IR::Attribute attribute);
     [[nodiscard]] F32 GetAttribute(IR::Attribute attribute, const U32& vertex);
     [[nodiscard]] U32 GetAttributeU32(IR::Attribute attribute);

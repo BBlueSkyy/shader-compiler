@@ -55,6 +55,8 @@ std::optional<OutAttr> OutputAttrPointer(EmitContext& ctx, IR::Attribute attr) {
         }
     }
     switch (attr) {
+    case IR::Attribute::PrimitiveId:
+        return OutAttr{ctx.output_primitive_id, ctx.U32[1]};
     case IR::Attribute::PointSize:
         return ctx.output_point_size;
     case IR::Attribute::PositionX:
@@ -290,7 +292,14 @@ Id EmitGetCbufU32x2(EmitContext& ctx, const IR::Value& binding, const IR::Value&
     }
 }
 
-Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, Id vertex) {
+Id EmitGetAttribute(EmitContext& ctx, IR::Inst* inst, IR::Attribute attr, Id vertex) {
+    if ((inst->Flags<u32>() & 1) != 0) {
+        const auto index{inst->Arg(1).U32()};
+        if (ctx.runtime_info.input_topology == InputTopology::LinesAdjacency)
+            vertex = ctx.Const(index + 1);
+        else if (ctx.runtime_info.input_topology == InputTopology::TrianglesAdjacency)
+            vertex = ctx.Const(index * 2);
+    }
     const u32 element{static_cast<u32>(attr) % 4};
     if (IR::IsGeneric(attr)) {
         const u32 index{IR::GenericAttributeIndex(attr)};
@@ -315,6 +324,8 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, Id vertex) {
         }();
     }
     switch (attr) {
+    case IR::Attribute::PointSize:
+        return ctx.OpLoad(ctx.F32[1], AttrPointer(ctx, ctx.input_f32, vertex, ctx.input_point_size));
     case IR::Attribute::PrimitiveId:
         return ctx.OpBitcast(ctx.F32[1], ctx.OpLoad(ctx.U32[1], ctx.primitive_id));
     case IR::Attribute::Layer:
@@ -416,6 +427,28 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, Id) {
     default:
         throw NotImplementedException("Read U32 attribute {}", attr);
     }
+}
+
+// Output variables become undefined after OpEmitVertex. Maxwell passthrough
+// outputs are per primitive, so keep their computed values in SSA across emits.
+std::vector<std::pair<Id, Id>> EmitContext::SavePassthroughOutputs() {
+    std::vector<std::pair<Id, Id>> saved;
+    if (!emulated_geometry_passthrough) return saved;
+    for (u32 index = 0; index < passthrough_preserve.mask.size(); ++index) {
+        if (!passthrough_preserve.mask[index]) continue;
+        const auto attr{static_cast<IR::Attribute>(index)};
+        // Legacy stores retain their original metadata after conversion, but
+        // their actual output pointers now live at the mapped generic location.
+        if (!IR::IsGeneric(attr) && attr != IR::Attribute::PrimitiveId && attr != IR::Attribute::Layer && attr != IR::Attribute::ViewportIndex &&
+            attr != IR::Attribute::PointSize && !(attr >= IR::Attribute::PositionX && attr <= IR::Attribute::PositionW) &&
+            !(attr >= IR::Attribute::ClipDistance0 && attr <= IR::Attribute::ClipDistance7)) continue;
+        const auto output{OutputAttrPointer(*this, attr)};
+        if (output) {
+            const auto type{ValidId(output->type) ? output->type : F32[1]};
+            saved.emplace_back(output->pointer, OpLoad(type, output->pointer));
+        }
+    }
+    return saved;
 }
 
 void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, [[maybe_unused]] Id vertex) {

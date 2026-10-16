@@ -26,6 +26,9 @@ struct Program {
     u32 invocations{};
     u32 local_memory_size{};
     u32 shared_memory_size{};
+    // Guest provenance is retained after lowering. The host flag means that the
+    // backend must emit native passthrough (no EmitVertex instructions).
+    bool was_geometry_passthrough{};
     bool is_geometry_passthrough{};
 };
 

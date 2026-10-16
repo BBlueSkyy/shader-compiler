@@ -127,6 +127,7 @@ void EmitEpilogue(EmitContext& ctx) {
 }
 
 void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
+    const auto preserved{ctx.SavePassthroughOutputs()};
     if (ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
@@ -137,6 +138,7 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
 
     // TODO: When geometry streams are supported, when a shader uses >1 stream OpEmitStreamVertex must be used instead
     ctx.OpEmitVertex();
+    for (const auto& [pointer, value] : preserved) ctx.OpStore(pointer, value);
 
     // Restore fixed pipeline point size after emitting the vertex
     SetFixedPipelinePointSize(ctx);
