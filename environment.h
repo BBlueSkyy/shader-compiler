@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <string_view>
 
 #include <shader_compiler/common/common_types.h>
 #include <shader_compiler/program_header.h>
@@ -50,6 +51,14 @@ public:
                                                                                u32 offset) = 0;
 
     virtual void Dump(u64 hash) = 0;
+
+    // Optional per-shader diagnostics. The default is intentionally inert:
+    // normal shaders must never allocate or stringify IR for diagnostics.
+    [[nodiscard]] virtual bool WantsTexturePassDiagnostic() const {
+        return false;
+    }
+
+    virtual void TraceTexturePassDiagnostic(std::string_view, std::string_view) {}
 
     [[nodiscard]] const ProgramHeader& SPH() const noexcept {
         return sph;
