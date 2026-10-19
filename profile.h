@@ -14,6 +14,9 @@ struct Profile {
     bool support_descriptor_aliasing{};
     bool support_int8{};
     bool support_int16{};
+    /// Enabled storageBuffer8BitAccess/storageBuffer16BitAccess features, independent of arithmetic.
+    bool support_storage8{};
+    bool support_storage16{};
     bool support_int64{};
     bool support_vertex_instance_id{};
     bool support_float_controls{};
@@ -31,6 +34,7 @@ struct Profile {
     bool support_viewport_index_layer_non_geometry{};
     bool support_viewport_mask{};
     bool support_typeless_image_loads{};
+    bool support_typeless_image_writes{};
     bool support_demote_to_helper_invocation{};
     bool support_int64_atomics{};
     bool support_derivative_control{};
