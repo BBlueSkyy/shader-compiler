@@ -85,6 +85,7 @@ struct StorageTypeDefinitions {
 };
 
 struct StorageDefinitions {
+    Id write_subword{};
     Id U8{};
     Id S8{};
     Id U16{};
@@ -189,6 +190,10 @@ public:
 
     UniformDefinitions uniform_types;
     StorageTypeDefinitions storage_types;
+    // Selected together for writable modules to avoid mixed atomic access widths.
+    bool native_storage8{};
+    bool native_storage16{};
+    bool emulate_subword_writes{};
 
     Id private_u32{};
 

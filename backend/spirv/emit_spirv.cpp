@@ -445,6 +445,9 @@ void SetupCapabilities(const Profile& profile, const Info& info, EmitContext& ct
         ctx.AddCapability(spv::Capability::StorageImageReadWithoutFormat);
     }
     if (info.uses_typeless_image_writes) {
+        if (!profile.support_typeless_image_writes) {
+            throw NotImplementedException("Typeless image writes are not supported by the host");
+        }
         ctx.AddCapability(spv::Capability::StorageImageWriteWithoutFormat);
     }
     if (info.uses_image_buffers) {

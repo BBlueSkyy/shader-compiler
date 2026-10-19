@@ -51,21 +51,26 @@ Id ImageType(EmitContext& ctx, const TextureDescriptor& desc) {
     throw InvalidArgument("Invalid texture type {}", desc.type);
 }
 
-spv::ImageFormat GetImageFormat(ImageFormat format) {
+spv::ImageFormat GetImageFormat(EmitContext& ctx, ImageFormat format) {
     switch (format) {
     case ImageFormat::Typeless:
         return spv::ImageFormat::Unknown;
     case ImageFormat::R8_UINT:
+        ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
         return spv::ImageFormat::R8ui;
     case ImageFormat::R8_SINT:
+        ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
         return spv::ImageFormat::R8i;
     case ImageFormat::R16_UINT:
+        ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
         return spv::ImageFormat::R16ui;
     case ImageFormat::R16_SINT:
+        ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
         return spv::ImageFormat::R16i;
     case ImageFormat::R32_UINT:
         return spv::ImageFormat::R32ui;
     case ImageFormat::R32G32_UINT:
+        ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
         return spv::ImageFormat::Rg32ui;
     case ImageFormat::R32G32B32A32_UINT:
         return spv::ImageFormat::Rgba32ui;
@@ -74,7 +79,7 @@ spv::ImageFormat GetImageFormat(ImageFormat format) {
 }
 
 Id ImageType(EmitContext& ctx, const ImageDescriptor& desc, Id sampled_type) {
-    const spv::ImageFormat format{GetImageFormat(desc.format)};
+    const spv::ImageFormat format{GetImageFormat(ctx, desc.format)};
     switch (desc.type) {
     case TextureType::Color1D:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, false, false, 2, format);
@@ -1148,15 +1153,42 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
     }
     AddExtension("SPV_KHR_storage_buffer_storage_class");
 
-    const IR::Type used_types{profile.support_descriptor_aliasing ? info.used_storage_buffer_types
-                                                                  : IR::Type::U32};
-    if (profile.support_int8 && True(used_types & IR::Type::U8)) {
+    IR::Type used_types{profile.support_descriptor_aliasing ? info.used_storage_buffer_types
+                                                            : IR::Type::U32};
+    native_storage8 = profile.support_int8 && profile.support_storage8 &&
+                      profile.support_descriptor_aliasing;
+    native_storage16 = profile.support_int16 && profile.support_storage16 &&
+                       profile.support_descriptor_aliasing;
+    const bool uses_int8{True(info.used_storage_buffer_types & IR::Type::U8)};
+    const bool uses_int16{True(info.used_storage_buffer_types & IR::Type::U16)};
+    const bool writable{std::any_of(info.storage_buffers_descriptors.begin(),
+                                    info.storage_buffers_descriptors.end(),
+                                    [](const auto& desc) { return desc.is_written; })};
+    // A native subword access must not overlap the word-sized atomic accesses
+    // used by another emulated width in the same writable shader. Use one
+    // access width throughout that module, including its subword reads.
+    emulate_subword_writes = writable && ((uses_int8 && !native_storage8) ||
+                                          (uses_int16 && !native_storage16));
+    if (emulate_subword_writes) {
+        native_storage8 = false;
+        native_storage16 = false;
+    }
+    const bool emulate_int8{uses_int8 && !native_storage8};
+    const bool emulate_int16{uses_int16 && !native_storage16};
+    if (emulate_int8 || emulate_int16) {
+        used_types |= IR::Type::U32;
+    }
+    if (native_storage8 && True(used_types & IR::Type::U8)) {
+        AddExtension("SPV_KHR_8bit_storage");
+        AddCapability(spv::Capability::StorageBuffer8BitAccess);
         DefineSsbos(*this, storage_types.U8, &StorageDefinitions::U8, info, binding, U8,
                     sizeof(u8));
         DefineSsbos(*this, storage_types.S8, &StorageDefinitions::S8, info, binding, S8,
                     sizeof(u8));
     }
-    if (profile.support_int16 && True(used_types & IR::Type::U16)) {
+    if (native_storage16 && True(used_types & IR::Type::U16)) {
+        AddExtension("SPV_KHR_16bit_storage");
+        AddCapability(spv::Capability::StorageBuffer16BitAccess);
         DefineSsbos(*this, storage_types.U16, &StorageDefinitions::U16, info, binding, U16,
                     sizeof(u16));
         DefineSsbos(*this, storage_types.S16, &StorageDefinitions::S16, info, binding, S16,
@@ -1184,6 +1216,47 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
     }
     for (const StorageBufferDescriptor& desc : info.storage_buffers_descriptors) {
         binding += desc.count;
+    }
+    if (emulate_subword_writes) {
+        // Use a helper per SSBO rather than passing StorageBuffer pointers as parameters:
+        // the latter would require the optional variablePointersStorageBuffer feature.
+        const Id func_type{TypeFunction(void_id, U32[1], U32[1], U32[1], U32[1])};
+        u32 index{};
+        for (const StorageBufferDescriptor& desc : info.storage_buffers_descriptors) {
+            const Id func{OpFunction(void_id, spv::FunctionControlMask::MaskNone, func_type)};
+            const Id word_offset{OpFunctionParameter(U32[1])};
+            const Id insert_value{OpFunctionParameter(U32[1])};
+            const Id bit_offset{OpFunctionParameter(U32[1])};
+            const Id bit_count{OpFunctionParameter(U32[1])};
+            const Id loop_header{OpLabel()};
+            const Id continue_block{OpLabel()};
+            const Id merge_block{OpLabel()};
+            AddLabel();
+            const Id pointer{OpAccessChain(storage_types.U32.element, ssbos[index].U32,
+                                           u32_zero_value, word_offset)};
+            OpBranch(loop_header);
+            AddLabel(loop_header);
+            const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
+            // All accesses in the read/modify/write loop are atomic. Relaxed ordering is
+            // sufficient; guest barriers supply ordering between separate operations.
+            const Id old_value{OpAtomicLoad(U32[1], pointer, scope, u32_zero_value)};
+            const Id new_value{OpBitFieldInsert(U32[1], old_value, insert_value, bit_offset,
+                                                bit_count)};
+            OpLoopMerge(merge_block, continue_block, spv::LoopControlMask::MaskNone);
+            OpBranch(continue_block);
+            AddLabel(continue_block);
+            const Id result{OpAtomicCompareExchange(U32[1], pointer, scope, u32_zero_value,
+                                                      u32_zero_value, new_value, old_value)};
+            const Id success{OpIEqual(U1, result, old_value)};
+            OpBranchConditional(success, merge_block, loop_header);
+            AddLabel(merge_block);
+            OpReturn();
+            OpFunctionEnd();
+            for (u32 i = 0; i < desc.count; ++i) {
+                ssbos[index + i].write_subword = func;
+            }
+            index += desc.count;
+        }
     }
     const bool needs_function{
         info.uses_global_increment || info.uses_global_decrement || info.uses_atomic_f32_add ||
@@ -1264,7 +1337,7 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
         if (desc.count != 1) {
             throw NotImplementedException("Array of image buffers");
         }
-        const spv::ImageFormat format{GetImageFormat(desc.format)};
+        const spv::ImageFormat format{GetImageFormat(*this, desc.format)};
         const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
         const Id image_type{TypeImage(sampled_type, spv::Dim::Buffer, false, false, false, 2, format)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
