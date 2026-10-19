@@ -717,9 +717,19 @@ void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
                 throw NotImplementedException("Dynamic fragment gather requires derivatives outside typed dispatch");
             }
             const auto info{inst.Flags<IR::TextureInstInfo>()};
-            if (info.type != TextureType::Color2D || info.is_depth ||
+            if ((info.type != TextureType::Color2D && info.type != TextureType::ColorArray2D) ||
+                info.is_depth ||
                 (inst.GetOpcode() == IR::Opcode::BindlessImageFetch && !inst.Arg(4).IsEmpty())) {
                 throw NotImplementedException("Dynamic textures require non-depth non-MS 2D shape");
+            }
+            if (info.type == TextureType::ColorArray2D) {
+                if (inst.GetOpcode() != IR::Opcode::BindlessImageSampleExplicitLod) {
+                    throw NotImplementedException("Dynamic 2D arrays currently require explicit-LOD sampling");
+                }
+                const auto coords_type{inst.Arg(1).Type()};
+                if (coords_type != IR::Type::F32x3 && coords_type != IR::Type::F32x4) {
+                    throw NotImplementedException("Dynamic 2D array coordinates must be float3 or float4");
+                }
             }
             if (info.has_lod_clamp != 0 &&
                 (implicit_fragment || inst.GetOpcode() == IR::Opcode::BindlessImageGradient)) {
@@ -850,8 +860,21 @@ void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
                         result = EmitImageSampleImplicitLod(*this, &inst, {}, arg(1), arg(2), inst.Arg(3));
                     }
                     break;
-                case IR::Opcode::BindlessImageSampleExplicitLod:
-                    result = EmitImageSampleExplicitLod(*this, &inst, {}, arg(1), arg(2), inst.Arg(3)); break;
+                case IR::Opcode::BindlessImageSampleExplicitLod: {
+                    Id coords{arg(1)};
+                    if (info.type == TextureType::ColorArray2D &&
+                        inst.Arg(1).Type() == IR::Type::F32x4) {
+                        // Maxwell 2D-array sampling uses (u, v, layer). Discard
+                        // the unused fourth component before emitting SPIR-V,
+                        // which requires precisely three array coordinates.
+                        coords = OpCompositeConstruct(F32[3],
+                            OpCompositeExtract(F32[1], coords, 0U),
+                            OpCompositeExtract(F32[1], coords, 1U),
+                            OpCompositeExtract(F32[1], coords, 2U));
+                    }
+                    result = EmitImageSampleExplicitLod(*this, &inst, {}, coords, arg(2), inst.Arg(3));
+                    break;
+                }
                 case IR::Opcode::BindlessImageGather:
                     result = EmitImageGather(*this, &inst, {}, arg(1), inst.Arg(2), inst.Arg(3)); break;
                 case IR::Opcode::BindlessImageFetch:

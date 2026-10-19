@@ -1415,7 +1415,8 @@ void EmitContext::DefineDynamicTextures(const Info& info) {
     Name(dynamic_metadata, "dynamic_texture_metadata");
     for (u32 group = 0; group < info.dynamic_textures.size(); ++group) {
         const auto& desc{info.dynamic_textures[group]};
-        if (desc.type != TextureType::Color2D || desc.is_depth) {
+        if ((desc.type != TextureType::Color2D && desc.type != TextureType::ColorArray2D) ||
+            desc.is_depth) {
             throw NotImplementedException("Dynamic textures require non-depth 2D shape");
         }
         std::array<DynamicImageDefinition, 3> definitions{};

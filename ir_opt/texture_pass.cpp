@@ -632,7 +632,12 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     sparse->Invalidate();
                     sparse = nullptr;
                 }
-                if (flags.type != TextureType::Color2D || flags.is_depth || sparse) {
+                // Dynamic ColorArray2D currently supports explicit-LOD sampling only.
+                // Other operations retain their existing guarded fallback.
+                const bool supported_shape{flags.type == TextureType::Color2D ||
+                    (flags.type == TextureType::ColorArray2D &&
+                     opcode == IR::Opcode::ImageSampleExplicitLod)};
+                if (!supported_shape || flags.is_depth || sparse) {
                     throw NotImplementedException(
                         "Dynamic texture opcode={} type={} depth={} sparse={} coord_type={}",
                         inst.GetOpcode(), TextureTypeName(flags.type), flags.is_depth.Value(), sparse != nullptr,
