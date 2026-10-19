@@ -1,3 +1,20 @@
+## Follow-up: unused residency predicates before TexturePass DCE
+
+TexturePass runs before dead-code elimination. A `GetSparseFromOp` with no
+consumers previously rejected an otherwise supported dynamic 2D instruction.
+The pass now invalidates only that unused predicate, preserving the texture
+operation and runtime handle. Live predicates and unsupported image shapes
+remain rejected; the error now names the opcode, shape, depth bit, sparse bit
+and coordinate type rather than conflating them. Existing real TexturePass
+regressions reproduce the prior rejection and retain live-sparse/non-2D
+negative controls. This does not implement sparse resource residency.
+
+The supplied fragment log identifies hash `34BADCCFFEBF7034` at `0x3BA4030`,
+but contains neither Maxwell nor IR nor the individual shape/status flags.
+It does not establish that the unused-predicate defect caused that shader's
+failure. Do not claim a particular missing resource type or restored device
+progress from this test.
+
 > Follow-up: the compute GPU descriptor path now preserves SSBO-loaded handles
 > and Phi expressions. See [the dynamic handle contract](../dynamic_textures/README.md)
 > and [real Vulkan execution tests](../dynamic_vulkan/README.md). The rejection-only

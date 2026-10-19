@@ -17,6 +17,21 @@
 
 namespace Shader::Optimization {
 namespace {
+std::string_view TextureTypeName(TextureType type) {
+    switch (type) {
+    case TextureType::Color1D: return "Color1D";
+    case TextureType::ColorArray1D: return "ColorArray1D";
+    case TextureType::Color2D: return "Color2D";
+    case TextureType::ColorArray2D: return "ColorArray2D";
+    case TextureType::Color3D: return "Color3D";
+    case TextureType::ColorCube: return "ColorCube";
+    case TextureType::ColorArrayCube: return "ColorArrayCube";
+    case TextureType::Buffer: return "Buffer";
+    case TextureType::Color2DRect: return "Color2DRect";
+    }
+    return "Unknown";
+}
+
 struct ConstBufferAddr {
     u32 index;
     u32 offset;
@@ -610,9 +625,18 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 if (opcode == IR::Opcode::ImageQueryDimensions) {
                     flags.type.Assign(TextureType::Color2D);
                 }
-                if (flags.type != TextureType::Color2D || flags.is_depth ||
-                    inst.GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)) {
-                    throw NotImplementedException("Dynamic non-2D/depth textures or sparse texture operations");
+                auto* sparse{inst.GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)};
+                if (sparse && !sparse->HasUses()) {
+                    // This pass precedes DCE. An unconsumed Maxwell predicate
+                    // output does not require a Vulkan sparse image operation.
+                    sparse->Invalidate();
+                    sparse = nullptr;
+                }
+                if (flags.type != TextureType::Color2D || flags.is_depth || sparse) {
+                    throw NotImplementedException(
+                        "Dynamic texture opcode={} type={} depth={} sparse={} coord_type={}",
+                        inst.GetOpcode(), TextureTypeName(flags.type), flags.is_depth.Value(), sparse != nullptr,
+                        inst.Arg(1).Type());
                 }
                 if (opcode == IR::Opcode::ImageFetch && !inst.Arg(4).IsEmpty()) {
                     throw NotImplementedException("Dynamic multisample texture fetch");

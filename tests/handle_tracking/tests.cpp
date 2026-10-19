@@ -317,6 +317,38 @@ int main(int argc,char** argv) {
         check(sampled.Inst()->Arg(0)==handle && graphics.program.info.dynamic_textures.size()==1,
               "graphics dynamic handle was not preserved");
     }
+    // Maxwell may write an unused residency predicate. TexturePass runs before
+    // DCE, so its presence alone must not demand sparse-image execution.
+    Fixture unused_residency;
+    unused_residency.program.stage=Stage::Fragment;
+    unused_residency.env.dynamic_enabled=true;
+    const auto residency_sample=unused_residency.sample(unused_residency.storage(IR::Value{0U}));
+    const auto unused_status=unused_residency.op(IR::Opcode::GetSparseFromOp,{residency_sample});
+    check(!unused_status.Inst()->HasUses(), "residency test accidentally consumes its predicate");
+    unused_residency.run();
+    check(residency_sample.Inst()->GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)==nullptr &&
+          unused_residency.program.info.dynamic_textures.size()==1,
+          "unused residency predicate incorrectly requires sparse dynamic textures");
+    for (const bool live_sparse : {false, true}) {
+        Fixture rejected;
+        rejected.env.dynamic_enabled=true;
+        const auto sample=rejected.sample(rejected.storage(IR::Value{0U}));
+        if (live_sparse) {
+            const auto status=rejected.op(IR::Opcode::GetSparseFromOp,{sample});
+            rejected.op(IR::Opcode::LogicalNot,{status});
+        } else {
+            auto info=sample.Inst()->Flags<IR::TextureInstInfo>();
+            info.type.Assign(TextureType::ColorCube);
+            sample.Inst()->SetFlags(info);
+        }
+        bool precise=false;
+        try { rejected.run(); } catch (const NotImplementedException& error) {
+            const std::string reason=error.what();
+            precise=reason.find("opcode=BindlessImageSampleExplicitLod")!=std::string::npos &&
+                reason.find(live_sparse ? "sparse=true" : "type=ColorCube")!=std::string::npos;
+        }
+        check(precise, "dynamic texture rejection lost the actual shape/sparse distinction");
+    }
     Fixture vertex_a, vertex_b;
     vertex_a.env.dynamic_enabled=vertex_b.env.dynamic_enabled=true;
     const auto a_query=vertex_a.query(vertex_a.storage(IR::Value{0U}));
