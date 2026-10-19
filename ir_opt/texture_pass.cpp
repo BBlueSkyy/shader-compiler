@@ -10,7 +10,6 @@
 
 #include <shader_compiler/environment.h>
 #include <shader_compiler/frontend/ir/basic_block.h>
-#include <shader_compiler/frontend/ir/breadth_first_search.h>
 #include <shader_compiler/frontend/ir/ir_emitter.h>
 #include <shader_compiler/host_translate_info.h>
 #include <shader_compiler/ir_opt/passes.h>
@@ -18,6 +17,21 @@
 
 namespace Shader::Optimization {
 namespace {
+std::string_view TextureTypeName(TextureType type) {
+    switch (type) {
+    case TextureType::Color1D: return "Color1D";
+    case TextureType::ColorArray1D: return "ColorArray1D";
+    case TextureType::Color2D: return "Color2D";
+    case TextureType::ColorArray2D: return "ColorArray2D";
+    case TextureType::Color3D: return "Color3D";
+    case TextureType::ColorCube: return "ColorCube";
+    case TextureType::ColorArrayCube: return "ColorArrayCube";
+    case TextureType::Buffer: return "Buffer";
+    case TextureType::Color2DRect: return "Color2DRect";
+    }
+    return "Unknown";
+}
+
 struct ConstBufferAddr {
     u32 index;
     u32 offset;
@@ -25,6 +39,8 @@ struct ConstBufferAddr {
     u32 secondary_index;
     u32 secondary_offset;
     u32 secondary_shift_left;
+    u32 mask{~0U};
+    u32 secondary_mask{~0U};
     IR::U32 dynamic_offset;
     u32 count;
     bool has_secondary;
@@ -179,13 +195,17 @@ bool IsTextureInstruction(const IR::Inst& inst) {
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env);
 
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env) {
-    return IR::BreadthFirstSearch(
-        value, [&env](const IR::Inst* inst) { return TryGetConstBuffer(inst, env); });
+    // A handle is a value expression, not an arbitrary dependency of that value.
+    // In particular, a memory load's address does not describe the loaded handle.
+    // Resolve only identities; TryGetConstBuffer explicitly models every other
+    // supported transformation and must account for all of its value operands.
+    const IR::Inst* const inst{value.TryInstRecursive()};
+    return inst ? TryGetConstBuffer(inst, env) : std::nullopt;
 }
 
-std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
-    const IR::Inst* inst = value.InstRecursive();
-    if (inst->GetOpcode() != IR::Opcode::GetCbufU32) {
+std::optional<u32> TryGetConstantMaskOffset(const IR::Value& value) {
+    const IR::Inst* inst = value.TryInstRecursive();
+    if (!inst || inst->GetOpcode() != IR::Opcode::GetCbufU32) {
         return std::nullopt;
     }
     const IR::Value index{inst->Arg(0)};
@@ -196,18 +216,19 @@ std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
     if (!offset.IsImmediate()) {
         return std::nullopt;
     }
-    const auto index_number = index.U32();
-    if (index_number != 1) {
+    if (index.U32() != 1) {
         return std::nullopt;
     }
-    const auto offset_number = offset.U32();
-    return env.ReadCbufValue(index_number, offset_number);
+    return offset.U32();
 }
 
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env) {
     switch (inst->GetOpcode()) {
     default:
-        return std::nullopt;
+        throw NotImplementedException(
+            "Bindless texture handle provenance through {}: only CBUF values and explicitly "
+            "modelled value transformations are supported; GPU-loaded handles require a "
+            "GPU descriptor lookup path", inst->GetOpcode());
     case IR::Opcode::BitwiseOr32: {
         std::optional lhs{Track(inst->Arg(0), env)};
         std::optional rhs{Track(inst->Arg(1), env)};
@@ -230,6 +251,8 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
             .secondary_index = rhs->index,
             .secondary_offset = rhs->offset,
             .secondary_shift_left = rhs->shift_left,
+            .mask = lhs->mask,
+            .secondary_mask = rhs->mask,
             .dynamic_offset = {},
             .count = 1,
             .has_secondary = true,
@@ -242,10 +265,16 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         }
         std::optional lhs{Track(inst->Arg(0), env)};
         if (lhs) {
-            lhs->shift_left = shift.U32();
+            const u32 amount{shift.U32()};
+            lhs->mask = ShiftTextureHandle(lhs->mask, amount);
+            lhs->shift_left = amount >= 32 ? 32 : std::min(32U, lhs->shift_left + amount);
+            if (lhs->has_secondary) {
+                lhs->secondary_mask = ShiftTextureHandle(lhs->secondary_mask, amount);
+                lhs->secondary_shift_left = amount >= 32 ? 32 :
+                    std::min(32U, lhs->secondary_shift_left + amount);
+            }
         }
         return lhs;
-        break;
     }
     case IR::Opcode::BitwiseAnd32: {
         IR::Value op1{inst->Arg(0)};
@@ -253,28 +282,53 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         if (op1.IsImmediate()) {
             std::swap(op1, op2);
         }
+        std::optional<u32> constant_mask_offset;
         if (!op2.IsImmediate() && !op1.IsImmediate()) {
-            do {
-                auto try_index = TryGetConstant(op1, env);
-                if (try_index) {
-                    op1 = op2;
-                    op2 = IR::Value{*try_index};
-                    break;
-                }
-                auto try_index_2 = TryGetConstant(op2, env);
-                if (try_index_2) {
-                    op2 = IR::Value{*try_index_2};
-                    break;
-                }
+            constant_mask_offset = TryGetConstantMaskOffset(op1);
+            if (constant_mask_offset) {
+                std::swap(op1, op2);
+            } else if ((constant_mask_offset = TryGetConstantMaskOffset(op2));
+                       !constant_mask_offset) {
                 return std::nullopt;
-            } while (false);
+            }
         }
         std::optional lhs{Track(op1, env)};
         if (lhs) {
-            lhs->shift_left = static_cast<u32>(std::countr_zero(op2.U32()));
+            // A recognized static mask is a value, but its partner may still be
+            // a GPU load. Validate that partner before reading the mask CBUF.
+            const u32 mask{constant_mask_offset ? env.ReadCbufValue(1, *constant_mask_offset)
+                                              : op2.U32()};
+            lhs->mask &= mask;
+            if (lhs->has_secondary)
+                lhs->secondary_mask &= mask;
         }
         return lhs;
-        break;
+    }
+    case IR::Opcode::CompositeExtractU32x2: {
+        const IR::Value component{inst->Arg(1)};
+        if (!component.IsImmediate() || component.U32() >= 2) {
+            return std::nullopt;
+        }
+        const IR::Inst* const source{inst->Arg(0).TryInstRecursive()};
+        if (!source) {
+            return std::nullopt;
+        }
+        const u32 lane{component.U32()};
+        if (source->GetOpcode() == IR::Opcode::CompositeConstructU32x2) {
+            // Only the selected value contributes, not the other vector lanes.
+            return Track(source->Arg(lane), env);
+        }
+        if (source->GetOpcode() != IR::Opcode::GetCbufU32x2) {
+            return std::nullopt;
+        }
+        auto addr{TryGetConstBuffer(source, env)};
+        if (addr) {
+            if (addr->offset > std::numeric_limits<u32>::max() - lane * sizeof(u32)) {
+                return std::nullopt;
+            }
+            addr->offset += lane * static_cast<u32>(sizeof(u32));
+        }
+        return addr;
     }
     case IR::Opcode::GetCbufU32x2:
     case IR::Opcode::GetCbufU32:
@@ -333,7 +387,9 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst) {
     if (IsBindless(inst)) {
         const std::optional<ConstBufferAddr> track_addr{Track(inst.Arg(0), env)};
         if (!track_addr) {
-            throw NotImplementedException("Failed to track bindless texture constant buffer");
+            throw NotImplementedException(
+                "Unsupported bindless texture handle expression: the complete value must be "
+                "representable by CBUF descriptors; GPU-loaded handles need GPU descriptor lookup");
         }
         addr = *track_addr;
     } else {
@@ -356,24 +412,19 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst) {
     };
 }
 
+u32 ReadTextureHandle(Environment& env, const ConstBufferAddr& cbuf) {
+    const u32 primary{env.ReadCbufValue(cbuf.index, cbuf.offset)};
+    const u32 secondary{cbuf.has_secondary
+        ? env.ReadCbufValue(cbuf.secondary_index, cbuf.secondary_offset) : 0};
+    return EvaluateTextureHandle(cbuf, primary, secondary);
+}
+
 TextureType ReadTextureType(Environment& env, const ConstBufferAddr& cbuf) {
-    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
-    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
-    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset) << cbuf.shift_left};
-    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)
-                      << cbuf.secondary_shift_left};
-    return env.ReadTextureType(lhs_raw | rhs_raw);
+    return env.ReadTextureType(ReadTextureHandle(env, cbuf));
 }
 
 CompareFunction ReadTextureCompareFunc(Environment& env, const ConstBufferAddr& cbuf) {
-    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
-    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
-
-    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset) << cbuf.shift_left};
-    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)
-                      << cbuf.secondary_shift_left};
-
-    return env.ReadTextureCompareFunc(lhs_raw | rhs_raw);
+    return env.ReadTextureCompareFunc(ReadTextureHandle(env, cbuf));
 }
 
 IR::TextureCompareFunc NarrowTextureCompareFunc(CompareFunction func) {
@@ -399,20 +450,15 @@ IR::TextureCompareFunc NarrowTextureCompareFunc(CompareFunction func) {
 }
 
 TexturePixelFormat ReadTexturePixelFormat(Environment& env, const ConstBufferAddr& cbuf) {
-    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
-    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
-    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset)};
-    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)};
-    return env.ReadTexturePixelFormat(lhs_raw | rhs_raw);
+    return env.ReadTexturePixelFormat(ReadTextureHandle(env, cbuf));
 }
 
 bool IsTexturePixelFormatInteger(Environment& env, const ConstBufferAddr& cbuf) {
-    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
-    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
-    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset) << cbuf.shift_left};
-    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)
-                      << cbuf.secondary_shift_left};
-    return env.IsTexturePixelFormatInteger(lhs_raw | rhs_raw);
+    return env.IsTexturePixelFormatInteger(ReadTextureHandle(env, cbuf));
+}
+
+TextureComponentType ReadTextureComponentType(Environment& env, const ConstBufferAddr& cbuf) {
+    return env.ReadTextureComponentType(ReadTextureHandle(env, cbuf));
 }
 
 class Descriptors {
@@ -427,10 +473,14 @@ public:
 
     u32 Add(const TextureBufferDescriptor& desc) {
         return Add(texture_buffer_descriptors, desc, [&desc](const auto& existing) {
-            return desc.cbuf_index == existing.cbuf_index &&
+            return desc.component_type == existing.component_type &&
+                   desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset &&
                    desc.secondary_cbuf_index == existing.secondary_cbuf_index &&
                    desc.secondary_cbuf_offset == existing.secondary_cbuf_offset &&
+                   desc.shift_left == existing.shift_left &&
+                   desc.secondary_shift_left == existing.secondary_shift_left &&
+                   desc.mask == existing.mask && desc.secondary_mask == existing.secondary_mask &&
                    desc.count == existing.count && desc.size_shift == existing.size_shift &&
                    desc.has_secondary == existing.has_secondary;
         });
@@ -451,11 +501,16 @@ public:
     u32 Add(const TextureDescriptor& desc) {
         return Add(texture_descriptors, desc, [&desc](const auto& existing) {
             return desc.type == existing.type && desc.is_depth == existing.is_depth &&
+                   desc.component_type == existing.component_type &&
+                   desc.is_samplerless == existing.is_samplerless &&
                    desc.has_secondary == existing.has_secondary &&
                    desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset &&
                    desc.secondary_cbuf_index == existing.secondary_cbuf_index &&
                    desc.secondary_cbuf_offset == existing.secondary_cbuf_offset &&
+                   desc.shift_left == existing.shift_left &&
+                   desc.secondary_shift_left == existing.secondary_shift_left &&
+                   desc.mask == existing.mask && desc.secondary_mask == existing.secondary_mask &&
                    desc.count == existing.count && desc.size_shift == existing.size_shift;
         });
     }
@@ -546,7 +601,70 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (!IsTextureInstruction(inst)) {
                 continue;
             }
-            to_replace.push_back(MakeInst(env, block, inst));
+            try {
+                to_replace.push_back(MakeInst(env, block, inst));
+            } catch (const NotImplementedException&) {
+                if (!env.SupportsDynamicTextureHandles() || !IsBindless(inst)) {
+                    throw;
+                }
+                const auto opcode{IndexedInstruction(inst)};
+                switch (opcode) {
+                case IR::Opcode::ImageSampleImplicitLod:
+                case IR::Opcode::ImageSampleExplicitLod:
+                case IR::Opcode::ImageGather:
+                case IR::Opcode::ImageFetch:
+                case IR::Opcode::ImageQueryDimensions:
+                case IR::Opcode::ImageGradient:
+                    break;
+                default:
+                    throw NotImplementedException("Dynamic texture operation {}", inst.GetOpcode());
+                }
+                auto flags{inst.Flags<IR::TextureInstInfo>()};
+                // TXQ carries no instruction shape. The initial dynamic ABI
+                // accepts 2D TICs only; the runtime rejects every other shape.
+                if (opcode == IR::Opcode::ImageQueryDimensions) {
+                    flags.type.Assign(TextureType::Color2D);
+                }
+                auto* sparse{inst.GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)};
+                if (sparse && !sparse->HasUses()) {
+                    // This pass precedes DCE. An unconsumed Maxwell predicate
+                    // output does not require a Vulkan sparse image operation.
+                    sparse->Invalidate();
+                    sparse = nullptr;
+                }
+                // Dynamic ColorArray2D currently supports explicit-LOD sampling only.
+                // Other operations retain their existing guarded fallback.
+                const bool supported_shape{flags.type == TextureType::Color2D ||
+                    (flags.type == TextureType::ColorArray2D &&
+                     opcode == IR::Opcode::ImageSampleExplicitLod)};
+                if (!supported_shape || flags.is_depth || sparse) {
+                    throw NotImplementedException(
+                        "Dynamic texture opcode={} type={} depth={} sparse={} coord_type={}",
+                        inst.GetOpcode(), TextureTypeName(flags.type), flags.is_depth.Value(), sparse != nullptr,
+                        inst.Arg(1).Type());
+                }
+                if (opcode == IR::Opcode::ImageFetch && !inst.Arg(4).IsEmpty()) {
+                    throw NotImplementedException("Dynamic multisample texture fetch");
+                }
+                const bool samplerless{opcode == IR::Opcode::ImageFetch ||
+                                       opcode == IR::Opcode::ImageQueryDimensions};
+                auto& groups{program.info.dynamic_textures};
+                const auto found{std::find_if(groups.begin(), groups.end(), [&](const auto& group) {
+                    return group.type == flags.type && group.is_depth == (flags.is_depth != 0);
+                })};
+                u32 group_index;
+                if (found == groups.end()) {
+                    group_index = static_cast<u32>(groups.size());
+                    groups.push_back({flags.type, flags.is_depth != 0, samplerless});
+                } else {
+                    group_index = static_cast<u32>(found - groups.begin());
+                    found->is_samplerless &= samplerless;
+                }
+                flags.descriptor_index.Assign(group_index);
+                inst.SetFlags(flags);
+                // Keep the complete SSA handle and every original operand. GPU
+                // loads and value transforms must execute once per invocation.
+            }
         }
     }
     // Sort instructions to visit textures by constant buffer index, then by offset
@@ -655,12 +773,15 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (flags.type == TextureType::Buffer) {
                 index = descriptors.Add(TextureBufferDescriptor{
                     .has_secondary = cbuf.has_secondary,
+                    .component_type = ReadTextureComponentType(env, cbuf),
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
                     .shift_left = cbuf.shift_left,
                     .secondary_cbuf_index = cbuf.secondary_index,
                     .secondary_cbuf_offset = cbuf.secondary_offset,
                     .secondary_shift_left = cbuf.secondary_shift_left,
+                    .mask = cbuf.mask,
+                    .secondary_mask = cbuf.secondary_mask,
                     .count = cbuf.count,
                     .size_shift = DESCRIPTOR_SIZE_SHIFT,
                 });
@@ -668,6 +789,9 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 index = descriptors.Add(TextureDescriptor{
                     .type = flags.type,
                     .is_depth = flags.is_depth != 0,
+                    .is_samplerless = inst->GetOpcode() == IR::Opcode::ImageFetch ||
+                                      inst->GetOpcode() == IR::Opcode::ImageQueryDimensions,
+                    .component_type = ReadTextureComponentType(env, cbuf),
                     .has_secondary = cbuf.has_secondary,
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
@@ -675,6 +799,8 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .secondary_cbuf_index = cbuf.secondary_index,
                     .secondary_cbuf_offset = cbuf.secondary_offset,
                     .secondary_shift_left = cbuf.secondary_shift_left,
+                    .mask = cbuf.mask,
+                    .secondary_mask = cbuf.secondary_mask,
                     .count = cbuf.count,
                     .size_shift = DESCRIPTOR_SIZE_SHIFT,
                 });
@@ -700,6 +826,20 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (pixel_format != TexturePixelFormat::OTHER) {
                 PatchTexelFetch(*texture_inst.block, *texture_inst.inst, pixel_format);
             }
+        }
+    }
+}
+
+void JoinDynamicTextureInfo(IR::Program& base, IR::Program& source) {
+    const u32 group_base{static_cast<u32>(base.info.dynamic_textures.size())};
+    base.info.dynamic_textures.insert(base.info.dynamic_textures.end(),
+        source.info.dynamic_textures.begin(), source.info.dynamic_textures.end());
+    for (IR::Block* block : source.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (!IsTextureInstruction(inst) || !IsBindless(inst)) continue;
+            auto flags{inst.Flags<IR::TextureInstInfo>()};
+            flags.descriptor_index.Assign(group_base + flags.descriptor_index);
+            inst.SetFlags(flags);
         }
     }
 }

@@ -6,6 +6,7 @@
 #include <array>
 #include <bitset>
 #include <map>
+#include <vector>
 
 #include <shader_compiler/common/common_types.h>
 #include <shader_compiler/frontend/ir/type.h>
@@ -36,6 +37,12 @@ enum class TextureType : u32 {
     Color2DRect,
 };
 constexpr u32 NUM_TEXTURE_TYPES = 9;
+
+enum class TextureComponentType : u32 {
+    Float,
+    Uint,
+    Sint,
+};
 
 enum class TexturePixelFormat : u32 {
     A8B8G8R8_SNORM,
@@ -98,12 +105,15 @@ struct StorageBufferDescriptor {
 
 struct TextureBufferDescriptor {
     bool has_secondary;
+    TextureComponentType component_type{};
     u32 cbuf_index;
     u32 cbuf_offset;
     u32 shift_left;
     u32 secondary_cbuf_index;
     u32 secondary_cbuf_offset;
     u32 secondary_shift_left;
+    u32 mask{~0U};
+    u32 secondary_mask{~0U};
     u32 count;
     u32 size_shift;
 
@@ -128,6 +138,8 @@ using ImageBufferDescriptors = boost::container::small_vector<ImageBufferDescrip
 struct TextureDescriptor {
     TextureType type;
     bool is_depth;
+    bool is_samplerless{};
+    TextureComponentType component_type{};
     bool has_secondary;
     u32 cbuf_index;
     u32 cbuf_offset;
@@ -135,12 +147,43 @@ struct TextureDescriptor {
     u32 secondary_cbuf_index;
     u32 secondary_cbuf_offset;
     u32 secondary_shift_left;
+    u32 mask{~0U};
+    u32 secondary_mask{~0U};
     u32 count;
     u32 size_shift;
 
     auto operator<=>(const TextureDescriptor&) const = default;
 };
 using TextureDescriptors = boost::container::small_vector<TextureDescriptor, 12>;
+
+// Descriptor set 1 ABI for GPU-resident texture handles. Groups are keyed by
+// instruction shape and depth; samplerless is true only if every use is samplerless.
+struct DynamicTextureDescriptor {
+    TextureType type;
+    bool is_depth;
+    bool is_samplerless{};
+
+    auto operator<=>(const DynamicTextureDescriptor&) const = default;
+};
+using DynamicTextureDescriptors = std::vector<DynamicTextureDescriptor>;
+
+// Masks refer to the shifted result, so nested shifts and ANDs can be composed
+// without discarding bits from a guest texture/sampler handle.
+constexpr u32 ShiftTextureHandle(u32 value, u32 shift) {
+    return shift < 32 ? value << shift : 0;
+}
+
+template <typename Descriptor>
+constexpr u32 EvaluateTextureHandle(const Descriptor& desc, u32 primary, u32 secondary = 0) {
+    const u32 lhs{ShiftTextureHandle(primary, desc.shift_left) & desc.mask};
+    if constexpr (requires { desc.has_secondary; }) {
+        if (desc.has_secondary) {
+            return lhs | (ShiftTextureHandle(secondary, desc.secondary_shift_left) &
+                          desc.secondary_mask);
+        }
+    }
+    return lhs;
+}
 
 struct ImageDescriptor {
     TextureType type;
@@ -251,6 +294,7 @@ struct Info {
     TextureBufferDescriptors texture_buffer_descriptors;
     ImageBufferDescriptors image_buffer_descriptors;
     TextureDescriptors texture_descriptors;
+    DynamicTextureDescriptors dynamic_textures;
     ImageDescriptors image_descriptors;
 };
 

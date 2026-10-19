@@ -4,6 +4,8 @@
 #pragma once
 
 #include <array>
+#include <optional>
+#include <unordered_map>
 
 #include <sirit/sirit.h>
 
@@ -35,11 +37,15 @@ struct TextureDefinition {
     Id pointer_type;
     Id image_type;
     u32 count;
+    bool is_samplerless{};
+    TextureComponentType component_type{};
 };
 
 struct TextureBufferDefinition {
     Id id;
     u32 count;
+    Id image_type;
+    TextureComponentType component_type{};
 };
 
 struct ImageBufferDefinition {
@@ -124,6 +130,28 @@ public:
     ~EmitContext();
 
     [[nodiscard]] Id Def(const IR::Value& value);
+
+    void DefineDynamicTextureFunctions(IR::Program& program);
+    [[nodiscard]] Id DynamicTextureCall(IR::Inst* inst);
+
+    struct DynamicImageDefinition {
+        Id id;
+        Id image_type;
+        Id pointer_type;
+        Id sampled_type;
+    };
+    std::vector<std::array<DynamicImageDefinition, 3>> dynamic_images;
+    u32 dynamic_group_base{};
+    Id dynamic_samplers{};
+    Id dynamic_sampler_type{};
+    Id dynamic_sampler_pointer{};
+    Id dynamic_metadata{};
+    Id dynamic_metadata_pointer{};
+    std::unordered_map<const IR::Inst*, Id> dynamic_functions;
+    std::unordered_map<const IR::Inst*, Id> dynamic_parameters;
+    Id dynamic_image{};
+    Id dynamic_sampled_image{};
+    std::optional<TextureComponentType> dynamic_component_type;
 
     [[nodiscard]] Id BitOffset8(const IR::Value& offset);
     [[nodiscard]] Id BitOffset16(const IR::Value& offset);
@@ -339,6 +367,7 @@ private:
     void DefineStorageBuffers(const Info& info, u32& binding);
     void DefineTextureBuffers(const Info& info, u32& binding);
     void DefineImageBuffers(const Info& info, u32& binding);
+    void DefineDynamicTextures(const Info& info);
     void DefineTextures(const Info& info, u32& binding, u32& scaling_index);
     void DefineImages(const Info& info, u32& binding, u32& scaling_index);
     void DefineAttributeMemAccess(const Info& info);

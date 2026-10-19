@@ -27,7 +27,8 @@ enum class Operation {
 
 Id ImageType(EmitContext& ctx, const TextureDescriptor& desc) {
     const spv::ImageFormat format{spv::ImageFormat::Unknown};
-    const Id type{ctx.F32[1]};
+    const Id type{desc.component_type == TextureComponentType::Uint ? ctx.U32[1]
+                  : desc.component_type == TextureComponentType::Sint ? ctx.S32[1] : ctx.F32[1]};
     const bool depth{desc.is_depth};
     switch (desc.type) {
     case TextureType::Color1D:
@@ -482,12 +483,20 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineGlobalMemoryFunctions(program.info);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
+    dynamic_group_base = bindings.dynamic_texture;
+    DefineDynamicTextures(program.info);
+    bindings.dynamic_texture += static_cast<u32>(program.info.dynamic_textures.size());
+    DefineDynamicTextureFunctions(program);
 }
 
 EmitContext::~EmitContext() = default;
 
 Id EmitContext::Def(const IR::Value& value) {
     if (!value.IsImmediate()) {
+        if (const auto found = dynamic_parameters.find(value.InstRecursive());
+            found != dynamic_parameters.end()) {
+            return found->second;
+        }
         return value.InstRecursive()->Definition<Id>();
     }
     switch (value.Type()) {
@@ -1308,11 +1317,13 @@ void EmitContext::DefineTextureBuffers(const Info& info, u32& binding) {
         return;
     }
     const spv::ImageFormat format{spv::ImageFormat::Unknown};
-    image_buffer_type = TypeImage(F32[1], spv::Dim::Buffer, 0U, false, false, 1, format);
-    
-    const Id type{TypePointer(spv::StorageClass::UniformConstant, image_buffer_type)};
+
     texture_buffers.reserve(info.texture_buffer_descriptors.size());
     for (const TextureBufferDescriptor& desc : info.texture_buffer_descriptors) {
+        const Id sampled_type{desc.component_type == TextureComponentType::Uint ? U32[1]
+                              : desc.component_type == TextureComponentType::Sint ? S32[1] : F32[1]};
+        const Id image_type{TypeImage(sampled_type, spv::Dim::Buffer, 0U, false, false, 1, format)};
+        const Id type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         if (desc.count != 1) {
             throw NotImplementedException("Array of texture buffers");
         }
@@ -1323,6 +1334,8 @@ void EmitContext::DefineTextureBuffers(const Info& info, u32& binding) {
         texture_buffers.push_back({
             .id = id,
             .count = desc.count,
+            .image_type = image_type,
+            .component_type = desc.component_type,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
@@ -1358,11 +1371,75 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
     }
 }
 
+void EmitContext::DefineDynamicTextures(const Info& info) {
+    if (info.dynamic_textures.empty()) {
+        return;
+    }
+    if (!profile.support_dynamic_texture_handles) {
+        throw NotImplementedException("Dynamic texture handles require descriptor indexing");
+    }
+    AddExtension("SPV_EXT_descriptor_indexing");
+    AddExtension("SPV_KHR_storage_buffer_storage_class");
+    AddCapability(spv::Capability::ShaderNonUniformEXT);
+    AddCapability(spv::Capability::RuntimeDescriptorArrayEXT);
+    AddCapability(spv::Capability::SampledImageArrayNonUniformIndexingEXT);
+    auto bind = [&](Id type, spv::StorageClass storage, u32 binding) {
+        const Id id{AddGlobalVariable(TypePointer(storage, type), storage)};
+        Decorate(id, spv::Decoration::DescriptorSet, 1U);
+        Decorate(id, spv::Decoration::Binding, binding);
+        if (profile.supported_spirv >= 0x00010400) interfaces.push_back(id);
+        return id;
+    };
+    dynamic_sampler_type = TypeSampler();
+    dynamic_sampler_pointer = TypePointer(spv::StorageClass::UniformConstant, dynamic_sampler_type);
+    dynamic_samplers = bind(TypeRuntimeArray(dynamic_sampler_type),
+                            spv::StorageClass::UniformConstant, 0);
+    Name(dynamic_samplers, "dynamic_samplers");
+    if (Sirit::ValidId(storage_types.U32.array)) {
+        // Sirit interns types; reusing an existing SSBO block also avoids
+        // emitting duplicate ArrayStride/Block/Offset decorations.
+        dynamic_metadata = AddGlobalVariable(storage_types.U32.array, spv::StorageClass::StorageBuffer);
+        Decorate(dynamic_metadata, spv::Decoration::DescriptorSet, 1U);
+        Decorate(dynamic_metadata, spv::Decoration::Binding, 1U);
+        if (profile.supported_spirv >= 0x00010400) interfaces.push_back(dynamic_metadata);
+        dynamic_metadata_pointer = storage_types.U32.element;
+    } else {
+        const Id words{TypeRuntimeArray(U32[1])};
+        Decorate(words, spv::Decoration::ArrayStride, 4U);
+        const Id block{TypeStruct(words)};
+        Decorate(block, spv::Decoration::Block);
+        MemberDecorate(block, 0, spv::Decoration::Offset, 0U);
+        dynamic_metadata = bind(block, spv::StorageClass::StorageBuffer, 1);
+        dynamic_metadata_pointer = TypePointer(spv::StorageClass::StorageBuffer, U32[1]);
+    }
+    Name(dynamic_metadata, "dynamic_texture_metadata");
+    for (u32 group = 0; group < info.dynamic_textures.size(); ++group) {
+        const auto& desc{info.dynamic_textures[group]};
+        if ((desc.type != TextureType::Color2D && desc.type != TextureType::ColorArray2D) ||
+            desc.is_depth) {
+            throw NotImplementedException("Dynamic textures require non-depth 2D shape");
+        }
+        std::array<DynamicImageDefinition, 3> definitions{};
+        for (u32 component = 0; component < 3; ++component) {
+            const Id image_type{ImageType(*this, TextureDescriptor{
+                .type = desc.type, .is_depth = desc.is_depth,
+                .component_type = static_cast<TextureComponentType>(component)})};
+            const Id id{bind(TypeRuntimeArray(image_type),
+                             spv::StorageClass::UniformConstant, 2 + 3 * (dynamic_group_base + group) + component)};
+            Name(id, fmt::format("dynamic_images_{}_{}", group, component));
+            definitions[component] = {id, image_type,
+                TypePointer(spv::StorageClass::UniformConstant, image_type),
+                TypeSampledImage(image_type)};
+        }
+        dynamic_images.push_back(definitions);
+    }
+}
+
 void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_index) {
     textures.reserve(info.texture_descriptors.size());
     for (const TextureDescriptor& desc : info.texture_descriptors) {
         const Id image_type{ImageType(*this, desc)};
-        const Id sampled_type{TypeSampledImage(image_type)};
+        const Id sampled_type{desc.is_samplerless ? image_type : TypeSampledImage(image_type)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, sampled_type)};
         const Id desc_type{DescType(*this, sampled_type, pointer_type, desc.count)};
         const Id id{AddGlobalVariable(desc_type, spv::StorageClass::UniformConstant)};
@@ -1375,6 +1452,8 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
             .pointer_type = pointer_type,
             .image_type = image_type,
             .count = desc.count,
+            .is_samplerless = desc.is_samplerless,
+            .component_type = desc.component_type,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);

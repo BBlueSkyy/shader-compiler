@@ -13,6 +13,8 @@ struct Bindings {
     u32 storage_buffer{};
     u32 texture{};
     u32 image{};
+    // Shared across graphics stages; each stage retains local IR descriptor indices.
+    u32 dynamic_texture{};
     u32 texture_scaling_index{};
     u32 image_scaling_index{};
 };

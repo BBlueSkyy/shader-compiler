@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <string_view>
 
 #include <shader_compiler/common/common_types.h>
 #include <shader_compiler/program_header.h>
@@ -29,6 +30,15 @@ public:
 
     [[nodiscard]] virtual bool IsTexturePixelFormatInteger(u32 raw_handle) = 0;
 
+    [[nodiscard]] virtual TextureComponentType ReadTextureComponentType(u32 raw_handle) {
+        return IsTexturePixelFormatInteger(raw_handle) ? TextureComponentType::Uint
+                                                     : TextureComponentType::Float;
+    }
+
+    // Opt in only when the runtime supplies descriptor set 1 and enabled the
+    // Vulkan runtime descriptor array and nonuniform sampled-image features.
+    [[nodiscard]] virtual bool SupportsDynamicTextureHandles() const { return false; }
+
     [[nodiscard]] virtual u32 ReadViewportTransformState() = 0;
 
     [[nodiscard]] virtual u32 TextureBoundBuffer() const = 0;
@@ -45,6 +55,14 @@ public:
                                                                                u32 offset) = 0;
 
     virtual void Dump(u64 hash) = 0;
+
+    // Optional per-shader diagnostics. The default is intentionally inert:
+    // normal shaders must never allocate or stringify IR for diagnostics.
+    [[nodiscard]] virtual bool WantsTexturePassDiagnostic() const {
+        return false;
+    }
+
+    virtual void TraceTexturePassDiagnostic(std::string_view, std::string_view) {}
 
     [[nodiscard]] const ProgramHeader& SPH() const noexcept {
         return sph;

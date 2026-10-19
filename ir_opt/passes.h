@@ -29,6 +29,7 @@ void VerificationPass(const IR::Program& program);
 // Dual Vertex
 void VertexATransformPass(IR::Program& program);
 void VertexBTransformPass(IR::Program& program);
+void JoinDynamicTextureInfo(IR::Program& base, IR::Program& source);
 void JoinTextureInfo(Info& base, Info& source);
 void JoinStorageInfo(Info& base, Info& source);
 

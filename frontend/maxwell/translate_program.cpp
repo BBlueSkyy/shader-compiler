@@ -295,7 +295,26 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     Optimization::PositionPass(env, program);
 
     Optimization::GlobalMemoryToStorageBufferPass(program, host_info);
+
+    // Capture the original texture-handle expression before TexturePass rewrites
+    // bindless operations to indexed descriptors. Enabled only by the caller.
+    if (env.WantsTexturePassDiagnostic()) {
+        try {
+            const std::string ir_dump{IR::DumpProgram(program)};
+            env.TraceTexturePassDiagnostic("before_texture_pass", ir_dump);
+        } catch (...) {
+            // Diagnostics must never change shader translation semantics.
+        }
+    }
     Optimization::TexturePass(env, program, host_info);
+    if (env.WantsTexturePassDiagnostic()) {
+        try {
+            const std::string ir_dump{IR::DumpProgram(program)};
+            env.TraceTexturePassDiagnostic("after_texture_pass", ir_dump);
+        } catch (...) {
+            // Diagnostics must never change shader translation semantics.
+        }
+    }
 
     if (Settings::values.resolution_info.active) {
         Optimization::RescalingPass(program);
@@ -335,6 +354,7 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
     result.info.loads.mask |= vertex_b.info.loads.mask;
     result.info.stores.mask |= vertex_b.info.stores.mask;
 
+    Optimization::JoinDynamicTextureInfo(result, vertex_b);
     Optimization::JoinTextureInfo(result.info, vertex_b.info);
     Optimization::JoinStorageInfo(result.info, vertex_b.info);
     Optimization::DeadCodeEliminationPass(result);

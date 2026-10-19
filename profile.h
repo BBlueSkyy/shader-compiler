@@ -12,6 +12,8 @@ struct Profile {
 
     bool unified_descriptor_binding{};
     bool support_descriptor_aliasing{};
+    bool support_dynamic_texture_handles{};
+    bool support_min_lod{};
     bool support_int8{};
     bool support_int16{};
     /// Enabled storageBuffer8BitAccess/storageBuffer16BitAccess features, independent of arithmetic.

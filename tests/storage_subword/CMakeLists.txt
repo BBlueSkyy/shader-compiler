@@ -25,6 +25,7 @@ target_link_libraries(shader_backend_tests PUBLIC fmt::fmt sirit)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(shader_backend_tests PRIVATE -Werror=conversion)
 endif()
+
 add_executable(storage_subword_tests generate.cpp)
 target_link_libraries(storage_subword_tests PRIVATE shader_backend_tests)
 if(TEST_STORAGE_FEATURES)
@@ -33,6 +34,36 @@ endif()
 enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME storage_subword COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/verify.py $<TARGET_FILE:storage_subword_tests> ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/modules)
+
+option(TEST_HANDLE_TRACKING "Build texture handle IR regression suite" ON)
+if(TEST_HANDLE_TRACKING)
+    add_executable(handle_tracking_tests ../handle_tracking/tests.cpp
+        ${COMPILER_ROOT}/ir_opt/texture_pass.cpp ${COMPILER_ROOT}/frontend/ir/ir_emitter.cpp)
+    target_link_libraries(handle_tracking_tests PRIVATE shader_backend_tests)
+    target_compile_definitions(handle_tracking_tests PRIVATE TEST_HANDLE_SPIRV)
+    target_compile_options(handle_tracking_tests PRIVATE -fsanitize=undefined -fno-sanitize-recover=all)
+    target_link_options(handle_tracking_tests PRIVATE -fsanitize=undefined)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(handle_tracking_tests PRIVATE -Werror=conversion)
+    endif()
+    add_test(NAME handle_tracking COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../handle_tracking/verify.py $<TARGET_FILE:handle_tracking_tests>
+        ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/handle-modules)
+endif()
+
+option(TEST_IMAGE_FETCH "Build texture fetch operand regression suite" ON)
+if(TEST_IMAGE_FETCH)
+    add_executable(image_fetch_tests ../image_fetch/generate.cpp)
+    target_link_libraries(image_fetch_tests PRIVATE shader_backend_tests)
+    add_test(NAME image_fetch COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/../image_fetch/verify.py $<TARGET_FILE:image_fetch_tests> ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/fetch-modules)
+endif()
+
+option(TEST_TEXTURE_COMPONENTS "Build sampled texture numeric type regression suite" ON)
+if(TEST_TEXTURE_COMPONENTS)
+    add_executable(texture_components_tests ../texture_components/generate.cpp)
+    target_link_libraries(texture_components_tests PRIVATE shader_backend_tests)
+    add_test(NAME texture_components COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/../texture_components/verify.py $<TARGET_FILE:texture_components_tests> ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/component-modules)
+endif()
 
 option(TEST_STORAGE_IMAGES "Build image capability regression suite with shared backend" ON)
 option(TEST_TYPELESS_WRITES "Exercise typeless write capability gate" ON)
@@ -43,4 +74,24 @@ if(TEST_STORAGE_IMAGES)
         target_compile_definitions(storage_images_tests PRIVATE TEST_TYPELESS_WRITES)
     endif()
     add_test(NAME storage_images COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../storage_images/verify.py $<TARGET_FILE:storage_images_tests> ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/image-modules)
+endif()
+
+option(TEST_DYNAMIC_TEXTURES "Build GPU dynamic texture handle regression kernels" ON)
+if(TEST_DYNAMIC_TEXTURES)
+    add_executable(dynamic_texture_tests ../dynamic_textures/generate.cpp)
+    target_link_libraries(dynamic_texture_tests PRIVATE shader_backend_tests)
+    add_test(NAME dynamic_textures COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/../dynamic_textures/verify.py $<TARGET_FILE:dynamic_texture_tests>
+        ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/dynamic-modules)
+endif()
+
+# Run real production-kernel execution when the Vulkan host SDK is present.
+# The runner reports a CTest skip on machines without descriptor indexing.
+find_package(Vulkan QUIET)
+option(TEST_DYNAMIC_VULKAN "Execute dynamic texture kernels on a Vulkan device" ${Vulkan_FOUND})
+if(TEST_DYNAMIC_TEXTURES AND TEST_DYNAMIC_VULKAN)
+    set(DYNAMIC_MODULE_DIR "${CMAKE_CURRENT_BINARY_DIR}/dynamic-modules" CACHE PATH
+        "Directory containing generated production dynamic texture kernels")
+    set(DYNAMIC_TEST_DEPENDENCY dynamic_textures)
+    add_subdirectory(../dynamic_vulkan dynamic-vulkan)
 endif()
