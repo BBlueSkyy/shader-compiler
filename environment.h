@@ -35,6 +35,10 @@ public:
                                                      : TextureComponentType::Float;
     }
 
+    // Opt in only when the runtime supplies descriptor set 1 and enabled the
+    // Vulkan runtime descriptor array and nonuniform sampled-image features.
+    [[nodiscard]] virtual bool SupportsDynamicTextureHandles() const { return false; }
+
     [[nodiscard]] virtual u32 ReadViewportTransformState() = 0;
 
     [[nodiscard]] virtual u32 TextureBoundBuffer() const = 0;

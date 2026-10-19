@@ -22,6 +22,8 @@ void Error(const std::string&) {}
 using namespace Shader;
 struct TestEnvironment final : Environment {
     std::array<u32, 8> values{0x6ec00021U, 3U, 0xffffffffU, 0xabc12345U};
+    bool dynamic_enabled{};
+    bool SupportsDynamicTextureHandles() const override { return dynamic_enabled; }
     u32 last_handle{};
     u32 cbuf_reads{};
     u32 texture_queries{};
@@ -273,5 +275,43 @@ int main(int argc,char** argv) {
     for(u32 access=0;access<256;++access) aliases.query(aliases.cbuf(3));
     aliases.run();
     check(aliases.program.info.texture_descriptors.size()==1,"independent accesses no longer share their descriptor");
+    // Opt-in preserves GPU-loaded values and complete transforms, rather than
+    // resolving the address of a load as a host-readable texture handle.
+    Fixture gpu;
+    gpu.program.stage=Stage::Compute;
+    gpu.env.dynamic_enabled=true;
+    const auto loaded=gpu.storage(IR::Value{0U});
+    const auto sampler=gpu.storage(IR::Value{4U});
+    const auto handle=gpu.either(gpu.mask(loaded,0xfffffU),gpu.shl(sampler,20));
+    const auto sampled=gpu.sample(handle);
+    const auto dimensions=gpu.query(handle);
+    gpu.run();
+    check(sampled.Inst()->GetOpcode()==IR::Opcode::BindlessImageSampleExplicitLod &&
+          sampled.Inst()->Arg(0)==handle && dimensions.Inst()->Arg(0)==handle,
+          "dynamic handle or opcode was rewritten");
+    check(gpu.env.cbuf_reads==0 && gpu.env.texture_queries==0,
+          "dynamic texture accessed a host descriptor");
+    check(gpu.program.info.texture_descriptors.empty() &&
+          gpu.program.info.dynamic_textures.size()==1 &&
+          !gpu.program.info.dynamic_textures[0].is_samplerless,
+          "dynamic groups did not deduplicate sample/query by shape");
+    Fixture gpu_phi;
+    gpu_phi.program.stage=Stage::Compute;
+    gpu_phi.env.dynamic_enabled=true;
+    const auto phi=gpu_phi.op(IR::Opcode::Phi,{});
+    phi.Inst()->SetFlags(IR::Type::U32);
+    phi.Inst()->AddPhiOperand(&gpu_phi.block,gpu_phi.storage(IR::Value{0U}));
+    phi.Inst()->AddPhiOperand(&gpu_phi.block,gpu_phi.storage(IR::Value{4U}));
+    const auto phi_query=gpu_phi.query(phi);
+    gpu_phi.run();
+    check(phi_query.Inst()->Arg(0)==phi && gpu_phi.program.info.dynamic_textures.size()==1,
+          "dynamic Phi handle was not preserved");
+    Fixture opted_static;
+    opted_static.env.dynamic_enabled=true;
+    opted_static.query(opted_static.cbuf(0));
+    opted_static.run();
+    check(opted_static.program.info.dynamic_textures.empty() &&
+          opted_static.program.info.texture_descriptors.size()==1,
+          "opt-in changed representable static fast path");
     std::cout<<"PASS real TexturePass masks, shifts, split handles, query/runtime agreement and deduplication\n";
 }

@@ -6,6 +6,7 @@
 #include <array>
 #include <bitset>
 #include <map>
+#include <vector>
 
 #include <shader_compiler/common/common_types.h>
 #include <shader_compiler/frontend/ir/type.h>
@@ -155,6 +156,17 @@ struct TextureDescriptor {
 };
 using TextureDescriptors = boost::container::small_vector<TextureDescriptor, 12>;
 
+// Descriptor set 1 ABI for GPU-resident texture handles. Groups are keyed by
+// instruction shape and depth; samplerless is true only if every use is samplerless.
+struct DynamicTextureDescriptor {
+    TextureType type;
+    bool is_depth;
+    bool is_samplerless{};
+
+    auto operator<=>(const DynamicTextureDescriptor&) const = default;
+};
+using DynamicTextureDescriptors = std::vector<DynamicTextureDescriptor>;
+
 // Masks refer to the shifted result, so nested shifts and ANDs can be composed
 // without discarding bits from a guest texture/sampler handle.
 constexpr u32 ShiftTextureHandle(u32 value, u32 shift) {
@@ -282,6 +294,7 @@ struct Info {
     TextureBufferDescriptors texture_buffer_descriptors;
     ImageBufferDescriptors image_buffer_descriptors;
     TextureDescriptors texture_descriptors;
+    DynamicTextureDescriptors dynamic_textures;
     ImageDescriptors image_descriptors;
 };
 

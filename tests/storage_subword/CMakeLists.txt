@@ -75,3 +75,23 @@ if(TEST_STORAGE_IMAGES)
     endif()
     add_test(NAME storage_images COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../storage_images/verify.py $<TARGET_FILE:storage_images_tests> ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/image-modules)
 endif()
+
+option(TEST_DYNAMIC_TEXTURES "Build GPU dynamic texture handle regression kernels" ON)
+if(TEST_DYNAMIC_TEXTURES)
+    add_executable(dynamic_texture_tests ../dynamic_textures/generate.cpp)
+    target_link_libraries(dynamic_texture_tests PRIVATE shader_backend_tests)
+    add_test(NAME dynamic_textures COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/../dynamic_textures/verify.py $<TARGET_FILE:dynamic_texture_tests>
+        ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/dynamic-modules)
+endif()
+
+# Run real production-kernel execution when the Vulkan host SDK is present.
+# The runner reports a CTest skip on machines without descriptor indexing.
+find_package(Vulkan QUIET)
+option(TEST_DYNAMIC_VULKAN "Execute dynamic texture kernels on a Vulkan device" ${Vulkan_FOUND})
+if(TEST_DYNAMIC_TEXTURES AND TEST_DYNAMIC_VULKAN)
+    set(DYNAMIC_MODULE_DIR "${CMAKE_CURRENT_BINARY_DIR}/dynamic-modules" CACHE PATH
+        "Directory containing generated production dynamic texture kernels")
+    set(DYNAMIC_TEST_DEPENDENCY dynamic_textures)
+    add_subdirectory(../dynamic_vulkan dynamic-vulkan)
+endif()

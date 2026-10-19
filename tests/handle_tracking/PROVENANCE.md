@@ -1,3 +1,9 @@
+> Follow-up: the compute GPU descriptor path now preserves SSBO-loaded handles
+> and Phi expressions. See [the dynamic handle contract](../dynamic_textures/README.md)
+> and [real Vulkan execution tests](../dynamic_vulkan/README.md). The rejection-only
+> result below records the earlier stage and remains the behavior when dynamic
+> support is not opted in. Static semantic provenance remains unchanged.
+
 # Texture handle provenance: verified partial fix
 
 ## Demonstrated defect

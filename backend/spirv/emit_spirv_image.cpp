@@ -183,6 +183,7 @@ Id AddFetchOffset(EmitContext& ctx, TextureType type, Id coords, Id offset) {
 }
 
 Id Texture(EmitContext& ctx, IR::TextureInstInfo info, [[maybe_unused]] const IR::Value& index) {
+    if (Sirit::ValidId(ctx.dynamic_sampled_image)) return ctx.dynamic_sampled_image;
     const TextureDefinition& def{ctx.textures.at(info.descriptor_index)};
     if (def.count > 1) {
         const Id pointer{ctx.OpAccessChain(def.pointer_type, def.id, ctx.Def(index))};
@@ -193,6 +194,7 @@ Id Texture(EmitContext& ctx, IR::TextureInstInfo info, [[maybe_unused]] const IR
 }
 
 Id TextureImage(EmitContext& ctx, IR::TextureInstInfo info, const IR::Value& index) {
+    if (Sirit::ValidId(ctx.dynamic_image)) return ctx.dynamic_image;
     if (index.Type() == IR::Type::U32 && (!index.IsImmediate() || index.U32() != 0)) {
         throw NotImplementedException("Indirect image indexing");
     }
@@ -254,7 +256,7 @@ Id EmitTexture(MethodPtrType sparse_ptr, MethodPtrType non_sparse_ptr, EmitConte
                IR::Inst* inst, Args&&... args) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const TextureComponentType component_type{
-        info.type == TextureType::Buffer
+        ctx.dynamic_component_type ? *ctx.dynamic_component_type : info.type == TextureType::Buffer
             ? ctx.texture_buffers.at(info.descriptor_index).component_type
             : ctx.textures.at(info.descriptor_index).component_type};
     Id result_type;
@@ -352,44 +354,44 @@ Id ComparisonFunction(EmitContext& ctx, CompareFunction comparison, Id operand_1
 }
 } // Anonymous namespace
 
-Id EmitBindlessImageSampleImplicitLod(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+Id EmitBindlessImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst) {
+    return ctx.DynamicTextureCall(inst);
 }
 
-Id EmitBindlessImageSampleExplicitLod(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+Id EmitBindlessImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst) {
+    return ctx.DynamicTextureCall(inst);
 }
 
 Id EmitBindlessImageSampleDrefImplicitLod(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+    throw NotImplementedException("Dynamic depth textures");
 }
 
 Id EmitBindlessImageSampleDrefExplicitLod(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+    throw NotImplementedException("Dynamic depth textures");
 }
 
-Id EmitBindlessImageGather(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+Id EmitBindlessImageGather(EmitContext& ctx, IR::Inst* inst) {
+    return ctx.DynamicTextureCall(inst);
 }
 
 Id EmitBindlessImageGatherDref(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+    throw NotImplementedException("Dynamic depth textures");
 }
 
-Id EmitBindlessImageFetch(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+Id EmitBindlessImageFetch(EmitContext& ctx, IR::Inst* inst) {
+    return ctx.DynamicTextureCall(inst);
 }
 
-Id EmitBindlessImageQueryDimensions(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+Id EmitBindlessImageQueryDimensions(EmitContext& ctx, IR::Inst* inst) {
+    return ctx.DynamicTextureCall(inst);
 }
 
 Id EmitBindlessImageQueryLod(EmitContext&) {
     throw LogicError("Unreachable instruction");
 }
 
-Id EmitBindlessImageGradient(EmitContext&) {
-    throw LogicError("Unreachable instruction");
+Id EmitBindlessImageGradient(EmitContext& ctx, IR::Inst* inst) {
+    return ctx.DynamicTextureCall(inst);
 }
 
 Id EmitBindlessImageRead(EmitContext&) {
@@ -648,6 +650,192 @@ Id EmitIsImageScaled(EmitContext& ctx, const IR::Value& index) {
         const Id mask{ctx.OpBitcast(ctx.U32[1], mask_f32)};
         return BitTest(ctx, mask, ctx.Def(index));
     }
+}
+
+
+namespace {
+Id DynamicValueType(EmitContext& ctx, IR::Type type) {
+    switch (type) {
+    case IR::Type::U1: return ctx.U1;
+    case IR::Type::U32: return ctx.U32[1];
+    case IR::Type::U32x2: return ctx.U32[2];
+    case IR::Type::U32x3: return ctx.U32[3];
+    case IR::Type::U32x4: return ctx.U32[4];
+    case IR::Type::F32: return ctx.F32[1];
+    case IR::Type::F32x2: return ctx.F32[2];
+    case IR::Type::F32x3: return ctx.F32[3];
+    case IR::Type::F32x4: return ctx.F32[4];
+    default: throw NotImplementedException("Dynamic texture argument type {}", type);
+    }
+}
+
+bool DynamicOperation(IR::Opcode opcode) {
+    switch (opcode) {
+    case IR::Opcode::BindlessImageSampleImplicitLod:
+    case IR::Opcode::BindlessImageSampleExplicitLod:
+    case IR::Opcode::BindlessImageGather:
+    case IR::Opcode::BindlessImageFetch:
+    case IR::Opcode::BindlessImageQueryDimensions:
+    case IR::Opcode::BindlessImageGradient:
+        return true;
+    default: return false;
+    }
+}
+}
+
+void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
+    for (IR::Block* block : program.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (!DynamicOperation(inst.GetOpcode())) continue;
+            if (!profile.support_dynamic_texture_handles || stage != Stage::Compute ||
+                dynamic_images.empty()) {
+                throw NotImplementedException("Dynamic texture handles require compute descriptor indexing");
+            }
+            if (inst.GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)) {
+                throw NotImplementedException("Sparse dynamic texture operations");
+            }
+            const auto info{inst.Flags<IR::TextureInstInfo>()};
+            if (info.type != TextureType::Color2D || info.is_depth ||
+                (inst.GetOpcode() == IR::Opcode::BindlessImageFetch && !inst.Arg(4).IsEmpty())) {
+                throw NotImplementedException("Dynamic textures require non-depth non-MS 2D shape");
+            }
+            const auto& group{dynamic_images.at(info.descriptor_index)};
+            const bool samplerless{inst.GetOpcode() == IR::Opcode::BindlessImageFetch ||
+                                   inst.GetOpcode() == IR::Opcode::BindlessImageQueryDimensions};
+            const Id result_type{DynamicValueType(*this, inst.Type())};
+            std::vector<Id> parameter_types;
+            for (size_t i = 0; i < inst.NumArgs(); ++i) {
+                const auto arg{inst.Arg(i)};
+                if (!arg.IsEmpty() && !arg.IsImmediate()) {
+                    parameter_types.push_back(DynamicValueType(*this, arg.Type()));
+                }
+            }
+            const Id function{OpFunction(result_type, spv::FunctionControlMask::MaskNone,
+                                           TypeFunction(result_type, std::span<const Id>{parameter_types}))};
+            Name(function, fmt::format("dynamic_texture_{}", dynamic_functions.size()));
+            dynamic_functions.emplace(&inst, function);
+            size_t parameter_index{};
+            for (size_t i = 0; i < inst.NumArgs(); ++i) {
+                const auto arg{inst.Arg(i)};
+                if (!arg.IsEmpty() && !arg.IsImmediate()) {
+                    dynamic_parameters[arg.InstRecursive()] = OpFunctionParameter(parameter_types[parameter_index++]);
+                }
+            }
+            AddLabel();
+            const Id handle{Def(inst.Arg(0))};
+            const Id zero{u32_zero_value};
+            const auto pointer = [&](Id word) {
+                return OpAccessChain(dynamic_metadata_pointer, dynamic_metadata, zero, word);
+            };
+            const auto metadata = [&](Id word) { return OpLoad(U32[1], pointer(word)); };
+            const auto reject = [&](Id valid, u32 code) {
+                const Id good{OpLabel()}, bad{OpLabel()};
+                OpSelectionMerge(good, spv::SelectionControlMask::MaskNone);
+                OpBranchConditional(valid, good, bad);
+                AddLabel(bad);
+                // First fault wins for this immutable descriptor-table snapshot.
+                // The raw handle is only consumed by the host after completion.
+                const Id claimed{OpAtomicCompareExchange(U32[1], pointer(Const(3U)), Const(1U),
+                                                         zero, zero, Const(code), zero)};
+                const Id write_handle{OpLabel()}, done{OpLabel()};
+                const Id is_first{OpIEqual(U1, claimed, zero)};
+                OpSelectionMerge(done, spv::SelectionControlMask::MaskNone);
+                OpBranchConditional(is_first, write_handle, done);
+                AddLabel(write_handle);
+                OpStore(pointer(Const(4U)), handle);
+                OpBranch(done);
+                AddLabel(done);
+                OpReturnValue(ConstantNull(result_type));
+                AddLabel(good);
+            };
+            const Id tic{OpBitwiseAnd(U32[1], handle, Const(0xfffffU))};
+            reject(OpULessThan(U1, tic, metadata(Const(0U))), 1);
+            reject(OpULessThan(U1, Const(info.descriptor_index), metadata(Const(5U))), 5);
+            Id tsc{};
+            Id sampler_flags{};
+            if (!samplerless) {
+                tsc = OpSelect(U32[1], OpINotEqual(U1, metadata(Const(2U)), zero), tic,
+                               OpShiftRightLogical(U32[1], handle, Const(20U)));
+                reject(OpULessThan(U1, tsc, metadata(Const(1U))), 2);
+                const Id validity_word{OpIAdd(U32[1],
+                    OpIAdd(U32[1], Const(8U), metadata(Const(5U))), tsc)};
+                sampler_flags = metadata(validity_word);
+                reject(OpINotEqual(U1, OpBitwiseAnd(U32[1], sampler_flags, Const(1U)), zero), 3);
+            }
+            const Id map_offset{metadata(Const(8U + info.descriptor_index))};
+            const Id entry{metadata(OpIAdd(U32[1], map_offset, tic))};
+            const Id component{OpBitwiseAnd(U32[1], entry, Const(3U))};
+            reject(OpULessThan(U1, component, Const(3U)), 4);
+            if (!samplerless) {
+                const Id uses_linear{OpINotEqual(U1, OpBitwiseAnd(U32[1], sampler_flags, Const(2U)), zero)};
+                const Id supports_linear{OpLogicalAnd(U1, OpIEqual(U1, component, zero),
+                    OpINotEqual(U1, OpBitwiseAnd(U32[1], entry, Const(0x80000000U)), zero))};
+                reject(OpLogicalOr(U1, OpLogicalNot(U1, uses_linear), supports_linear), 6);
+            }
+            const Id compact_index{OpShiftRightLogical(U32[1],
+                OpBitwiseAnd(U32[1], entry, Const(0x7fffffffU)), Const(2U))};
+            Decorate(compact_index, spv::Decoration::NonUniformEXT);
+            Id sampler{};
+            if (!samplerless) {
+                Decorate(tsc, spv::Decoration::NonUniformEXT);
+                const Id sampler_pointer{OpAccessChain(dynamic_sampler_pointer, dynamic_samplers, tsc)};
+                Decorate(sampler_pointer, spv::Decoration::NonUniformEXT);
+                sampler = OpLoad(dynamic_sampler_type, sampler_pointer);
+                Decorate(sampler, spv::Decoration::NonUniformEXT);
+            }
+            const std::array labels{OpLabel(), OpLabel(), OpLabel()};
+            const std::array<Sirit::Literal, 3> literals{0U, 1U, 2U};
+            const Id merge{OpLabel()};
+            OpSelectionMerge(merge, spv::SelectionControlMask::MaskNone);
+            OpSwitch(component, labels[0], literals, labels);
+            for (u32 type = 0; type < 3; ++type) {
+                AddLabel(labels[type]);
+                const auto& image{group[type]};
+                const Id image_pointer{OpAccessChain(image.pointer_type, image.id, compact_index)};
+                Decorate(image_pointer, spv::Decoration::NonUniformEXT);
+                dynamic_image = OpLoad(image.image_type, image_pointer);
+                Decorate(dynamic_image, spv::Decoration::NonUniformEXT);
+                dynamic_sampled_image = samplerless ? Id{} : OpSampledImage(image.sampled_type, dynamic_image, sampler);
+                if (!samplerless) Decorate(dynamic_sampled_image, spv::Decoration::NonUniformEXT);
+                dynamic_component_type = static_cast<TextureComponentType>(type);
+                const auto arg = [&](size_t i) { return Def(inst.Arg(i)); };
+                Id result;
+                switch (inst.GetOpcode()) {
+                case IR::Opcode::BindlessImageSampleImplicitLod:
+                    result = EmitImageSampleImplicitLod(*this, &inst, {}, arg(1), arg(2), inst.Arg(3)); break;
+                case IR::Opcode::BindlessImageSampleExplicitLod:
+                    result = EmitImageSampleExplicitLod(*this, &inst, {}, arg(1), arg(2), inst.Arg(3)); break;
+                case IR::Opcode::BindlessImageGather:
+                    result = EmitImageGather(*this, &inst, {}, arg(1), inst.Arg(2), inst.Arg(3)); break;
+                case IR::Opcode::BindlessImageFetch:
+                    result = EmitImageFetch(*this, &inst, {}, arg(1), arg(2), arg(3), arg(4)); break;
+                case IR::Opcode::BindlessImageQueryDimensions:
+                    result = EmitImageQueryDimensions(*this, &inst, {}, arg(1)); break;
+                case IR::Opcode::BindlessImageGradient:
+                    result = EmitImageGradient(*this, &inst, {}, arg(1), arg(2), arg(3), arg(4)); break;
+                default: throw LogicError("Invalid dynamic texture opcode");
+                }
+                OpReturnValue(result);
+            }
+            AddLabel(merge);
+            OpUnreachable();
+            OpFunctionEnd();
+            dynamic_parameters.clear();
+            dynamic_image = {};
+            dynamic_sampled_image = {};
+            dynamic_component_type.reset();
+        }
+    }
+}
+
+Id EmitContext::DynamicTextureCall(IR::Inst* inst) {
+    std::vector<Id> arguments;
+    for (size_t i = 0; i < inst->NumArgs(); ++i) {
+        const auto arg{inst->Arg(i)};
+        if (!arg.IsEmpty() && !arg.IsImmediate()) arguments.push_back(Def(arg));
+    }
+    return OpFunctionCall(DynamicValueType(*this, inst->Type()), dynamic_functions.at(inst),
+                          std::span<const Id>{arguments});
 }
 
 } // namespace Shader::Backend::SPIRV

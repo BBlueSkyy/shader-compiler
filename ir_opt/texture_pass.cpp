@@ -586,7 +586,59 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (!IsTextureInstruction(inst)) {
                 continue;
             }
-            to_replace.push_back(MakeInst(env, block, inst));
+            try {
+                to_replace.push_back(MakeInst(env, block, inst));
+            } catch (const NotImplementedException&) {
+                if (!env.SupportsDynamicTextureHandles() || !IsBindless(inst)) {
+                    throw;
+                }
+                if (program.stage != Stage::Compute) {
+                    throw NotImplementedException("Dynamic texture handles outside compute");
+                }
+                const auto opcode{IndexedInstruction(inst)};
+                switch (opcode) {
+                case IR::Opcode::ImageSampleImplicitLod:
+                case IR::Opcode::ImageSampleExplicitLod:
+                case IR::Opcode::ImageGather:
+                case IR::Opcode::ImageFetch:
+                case IR::Opcode::ImageQueryDimensions:
+                case IR::Opcode::ImageGradient:
+                    break;
+                default:
+                    throw NotImplementedException("Dynamic texture operation {}", inst.GetOpcode());
+                }
+                auto flags{inst.Flags<IR::TextureInstInfo>()};
+                // TXQ carries no instruction shape. The initial dynamic ABI
+                // accepts 2D TICs only; the runtime rejects every other shape.
+                if (opcode == IR::Opcode::ImageQueryDimensions) {
+                    flags.type.Assign(TextureType::Color2D);
+                }
+                if (flags.type != TextureType::Color2D || flags.is_depth ||
+                    inst.GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)) {
+                    throw NotImplementedException("Dynamic non-2D/depth textures or sparse texture operations");
+                }
+                if (opcode == IR::Opcode::ImageFetch && !inst.Arg(4).IsEmpty()) {
+                    throw NotImplementedException("Dynamic multisample texture fetch");
+                }
+                const bool samplerless{opcode == IR::Opcode::ImageFetch ||
+                                       opcode == IR::Opcode::ImageQueryDimensions};
+                auto& groups{program.info.dynamic_textures};
+                const auto found{std::find_if(groups.begin(), groups.end(), [&](const auto& group) {
+                    return group.type == flags.type && group.is_depth == (flags.is_depth != 0);
+                })};
+                u32 group_index;
+                if (found == groups.end()) {
+                    group_index = static_cast<u32>(groups.size());
+                    groups.push_back({flags.type, flags.is_depth != 0, samplerless});
+                } else {
+                    group_index = static_cast<u32>(found - groups.begin());
+                    found->is_samplerless &= samplerless;
+                }
+                flags.descriptor_index.Assign(group_index);
+                inst.SetFlags(flags);
+                // Keep the complete SSA handle and every original operand. GPU
+                // loads and value transforms must execute once per invocation.
+            }
         }
     }
     // Sort instructions to visit textures by constant buffer index, then by offset
