@@ -11,7 +11,7 @@ root = pathlib.Path(directory)
 root.mkdir(parents=True, exist_ok=True)
 subprocess.run([generator, str(root)], check=True)
 modules = sorted(root.glob('*.spv'))
-assert len(modules) == 18, len(modules)
+assert len(modules) == 168, len(modules)
 for path in modules:
     env = 'vulkan1.1spv1.4' if path.stem.endswith('_66560') else 'vulkan1.1'
     validation = subprocess.run([validator, '--target-env', env, str(path)], capture_output=True, text=True)
@@ -36,8 +36,14 @@ for path in modules:
             if a[1] == 33: bindings[a[0]] = a[2]
         if opcode == 251: switches.append(a)
         i += size
+    fragment = path.stem.startswith('fragment_')
+    prefix = next((name for name in ('vertex_', 'tess_control_', 'tess_eval_', 'geometry_', 'fragment_')
+                   if path.stem.startswith(name)), '')
+    kernel = path.stem.removeprefix(prefix)
+    group = {'': 0, 'vertex_': 0, 'tess_control_': 1, 'tess_eval_': 2,
+             'geometry_': 3, 'fragment_': 4}[prefix]
     dynamic_bindings = {bindings[key] for key, descriptor_set in sets.items() if descriptor_set == 1}
-    assert dynamic_bindings == {0, 1, 2, 3, 4}, (path, dynamic_bindings)
+    assert dynamic_bindings == {0, 1, 2 + 3 * group, 3 + 3 * group, 4 + 3 * group}, (path, dynamic_bindings)
     assert sum(op == 29 for op, a in operations) >= 5, (path, 'missing runtime descriptor arrays')
     nonuniform = {a[0] for a in decorations if a[1] == 5300}
     assert nonuniform, (path, 'missing NonUniform decoration')
@@ -57,12 +63,30 @@ for path in modules:
     assert sum(op == 230 for op, a in helper) >= 3, (path, 'missing atomic first-fault guards')
     # Both fault guards and typed dispatch live in a helper, outside the IR CFG.
     assert len(function_ops) == 2, (path, 'unexpected function count')
+    constants = {a[1]: a[2] for op, a in operations if op == 43 and len(a) == 3}
+    metadata = next(key for key, descriptor_set in sets.items()
+                    if descriptor_set == 1 and bindings[key] == 1)
+    metadata_words = {constants.get(a[-1]) for op, a in helper
+                      if op == 65 and a[2] == metadata}
+    assert 8 + group in metadata_words, (path, 'wrong stage metadata map offset')
+    if fragment and kernel.startswith('implicit'):
+        main = next(ops for ops in function_ops.values() if ops is not helper)
+        derivative_ops = [op for op, a in main if op in (207, 208)]
+        assert derivative_ops == [207, 208], (path, 'derivatives must be in main')
+        assert not any(op in (87, 207, 208) for op, a in helper), (path, 'divergent helper derivatives')
+        assert all(a[4] & 4 for op, a in helper if op == 88), (path, 'implicit sample must use Grad')
+        call = next(a for op, a in main if op == 57)
+        params = [a[1] for op, a in helper if op == 55]
+        assert len(call[3:]) == len(params), (path, 'gradient parameter mismatch')
+    if kernel.startswith('gradient_clamp') or (fragment and kernel.startswith('implicit_bias')):
+        assert any(op == 17 and a == (42,) for op, a in operations), (path, 'missing MinLod capability')
+        assert all(a[4] & 128 for op, a in helper if op == 88), (path, 'missing MinLod image operand')
     image_ops = [op for op, a in helper if op in (88, 95, 96, 103, 104, 106)]
-    if path.stem.startswith(('sample', 'transform', 'phi')):
+    if kernel.startswith(('sample', 'transform', 'phi', 'implicit', 'gradient')):
         assert image_ops.count(88) == 3, (path, image_ops)
-    if path.stem.startswith('fetch'): assert image_ops.count(95) == 3, (path, image_ops)
-    if path.stem.startswith('offset'): assert image_ops.count(96) == 3, (path, image_ops)
-    if path.stem.startswith(('fetch', 'query')):
+    if kernel.startswith('fetch'): assert image_ops.count(95) == 3, (path, image_ops)
+    if kernel.startswith('offset'): assert image_ops.count(96) == 3, (path, image_ops)
+    if kernel.startswith(('fetch', 'query')):
         sampler_type_ids = {a[0] for op, a in operations if op == 26}
         assert not any(op == 61 and a[0] in sampler_type_ids for op, a in helper), (path, 'samplerless operation loaded a sampler')
 print(f'Validated {len(modules)} executable dynamic texture modules, typed dispatch, samplerless access and atomic fault guards.')

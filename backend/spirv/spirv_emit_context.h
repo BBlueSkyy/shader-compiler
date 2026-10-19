@@ -141,6 +141,7 @@ public:
         Id sampled_type;
     };
     std::vector<std::array<DynamicImageDefinition, 3>> dynamic_images;
+    u32 dynamic_group_base{};
     Id dynamic_samplers{};
     Id dynamic_sampler_type{};
     Id dynamic_sampler_pointer{};

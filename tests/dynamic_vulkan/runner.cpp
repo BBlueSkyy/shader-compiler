@@ -74,6 +74,11 @@ public:
     VkPipelineLayout pipeline_layout{};
     VkShaderModule module{};
     VkPipeline pipeline{};
+    VkRenderPass render_pass{};
+    VkFramebuffer framebuffer{};
+    bool vertex{std::getenv("DYNAMIC_VULKAN_VERTEX") != nullptr};
+    VkShaderStageFlagBits ShaderStage() const { return vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_COMPUTE_BIT; }
+    VkPipelineStageFlags ShaderPipelineStage() const { return vertex ? VK_PIPELINE_STAGE_VERTEX_SHADER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT; }
     VkCommandPool command_pool{};
     VkCommandBuffer command{};
     bool remap{};
@@ -89,6 +94,8 @@ public:
             vkDeviceWaitIdle(device);
             if (command_pool) vkDestroyCommandPool(device, command_pool, nullptr);
             if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
+            if (framebuffer) vkDestroyFramebuffer(device, framebuffer, nullptr);
+            if (render_pass) vkDestroyRenderPass(device, render_pass, nullptr);
             if (module) vkDestroyShaderModule(device, module, nullptr);
             if (pipeline_layout) vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
             if (descriptor_pool) vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
@@ -178,6 +185,7 @@ public:
             vkGetPhysicalDeviceFeatures2(candidate, &features);
             if (features.features.shaderSampledImageArrayDynamicIndexing &&
                 features.features.shaderImageGatherExtended &&
+                (!vertex || features.features.vertexPipelineStoresAndAtomics) &&
                 supported.shaderSampledImageArrayNonUniformIndexing && supported.runtimeDescriptorArray &&
                 supported.descriptorBindingPartiallyBound) { physical = candidate; break; }
         }
@@ -191,7 +199,7 @@ public:
         vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
         std::vector<VkQueueFamilyProperties> queues(count);
         vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, queues.data());
-        while (family < count && !(queues[family].queueFlags & VK_QUEUE_COMPUTE_BIT)) ++family;
+        while (family < count && !(queues[family].queueFlags & (vertex ? VK_QUEUE_GRAPHICS_BIT : VK_QUEUE_COMPUTE_BIT))) ++family;
         if (family == count) throw Skip("No compute queue");
         float priority = 1;
         VkDeviceQueueCreateInfo queue_create{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -203,8 +211,12 @@ public:
         enable.runtimeDescriptorArray = VK_TRUE;
         enable.descriptorBindingPartiallyBound = VK_TRUE;
         VkDeviceCreateInfo device_create{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-        device_create.pNext = &enable;
+        VkPhysicalDeviceVulkan11Features vertex_features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+        vertex_features.shaderDrawParameters = vertex;
+        vertex_features.pNext = &enable;
+        device_create.pNext = vertex ? static_cast<void*>(&vertex_features) : static_cast<void*>(&enable);
         VkPhysicalDeviceFeatures core{};
+        core.vertexPipelineStoresAndAtomics = vertex;
         core.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
         // The production backend declares ImageGatherExtended for every module.
         core.shaderImageGatherExtended = VK_TRUE;
@@ -300,7 +312,7 @@ public:
         VkMemoryBarrier transfer{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         transfer.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         transfer.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, ShaderPipelineStage(),
             0, 1, &transfer, 0, nullptr, 0, nullptr);
         Submit();
         for (uint32_t i = 0; i < samplers.size(); ++i) {
@@ -314,14 +326,14 @@ public:
     }
     void InitPipeline(const char* path) {
         const std::array<VkDescriptorSetLayoutBinding, 2> ordinary{{
-            {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}}};
+            {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, ShaderStage(), nullptr},
+            {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, ShaderStage(), nullptr}}};
         const std::array<VkDescriptorSetLayoutBinding, 5> dynamic{{
-            {0, VK_DESCRIPTOR_TYPE_SAMPLER, TscCount, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-            {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-            {3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-            {4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}}};
+            {0, VK_DESCRIPTOR_TYPE_SAMPLER, TscCount, ShaderStage(), nullptr},
+            {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, ShaderStage(), nullptr},
+            {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4, ShaderStage(), nullptr},
+            {3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4, ShaderStage(), nullptr},
+            {4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4, ShaderStage(), nullptr}}};
         VkDescriptorSetLayoutCreateInfo layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         layout.bindingCount = uint32_t(ordinary.size());
         layout.pBindings = ordinary.data();
@@ -400,13 +412,45 @@ public:
         shader.codeSize = words.size() * 4;
         shader.pCode = words.data();
         CHECK_VK(vkCreateShaderModule(device, &shader, nullptr, &module));
-        VkComputePipelineCreateInfo compute{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        compute.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        compute.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        compute.stage.module = module;
-        compute.stage.pName = "main";
-        compute.layout = pipeline_layout;
-        CHECK_VK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &compute, nullptr, &pipeline));
+        if (vertex) {
+            VkSubpassDescription subpass{};
+            subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            VkRenderPassCreateInfo render{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+            render.subpassCount = 1;
+            render.pSubpasses = &subpass;
+            CHECK_VK(vkCreateRenderPass(device, &render, nullptr, &render_pass));
+            VkFramebufferCreateInfo frame{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+            frame.renderPass = render_pass;
+            frame.width = frame.height = frame.layers = 1;
+            CHECK_VK(vkCreateFramebuffer(device, &frame, nullptr, &framebuffer));
+            VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+            stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+            stage.module = module;
+            stage.pName = "main";
+            VkPipelineVertexInputStateCreateInfo input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+            VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+            assembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+            VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+            raster.rasterizerDiscardEnable = VK_TRUE;
+            raster.lineWidth = 1;
+            VkGraphicsPipelineCreateInfo graphics{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+            graphics.stageCount = 1;
+            graphics.pStages = &stage;
+            graphics.pVertexInputState = &input;
+            graphics.pInputAssemblyState = &assembly;
+            graphics.pRasterizationState = &raster;
+            graphics.layout = pipeline_layout;
+            graphics.renderPass = render_pass;
+            CHECK_VK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &graphics, nullptr, &pipeline));
+        } else {
+            VkComputePipelineCreateInfo compute{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            compute.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            compute.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            compute.stage.module = module;
+            compute.stage.pName = "main";
+            compute.layout = pipeline_layout;
+            CHECK_VK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &compute, nullptr, &pipeline));
+        }
     }
     uint32_t* Metadata() { return static_cast<uint32_t*>(buffers[2].mapped); }
     uint32_t* Handles() { return static_cast<uint32_t*>(buffers[0].mapped); }
@@ -432,16 +476,27 @@ public:
         VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         host.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
         host.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_HOST_BIT, ShaderPipelineStage(),
             0, 1, &host, 0, nullptr, 0, nullptr);
-        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout,
+        const auto bind_point{vertex ? VK_PIPELINE_BIND_POINT_GRAPHICS : VK_PIPELINE_BIND_POINT_COMPUTE};
+        if (vertex) {
+            VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+            begin.renderPass = render_pass;
+            begin.framebuffer = framebuffer;
+            begin.renderArea.extent = {1, 1};
+            vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        }
+        vkCmdBindPipeline(command, bind_point, pipeline);
+        vkCmdBindDescriptorSets(command, bind_point, pipeline_layout,
             0, uint32_t(sets.size()), sets.data(), 0, nullptr);
-        vkCmdDispatch(command, 1, 1, 1);
+        if (vertex) {
+            vkCmdDraw(command, Lanes, 1, 0, 0);
+            vkCmdEndRenderPass(command);
+        } else vkCmdDispatch(command, 1, 1, 1);
         VkMemoryBarrier readback{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         readback.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         readback.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+        vkCmdPipelineBarrier(command, ShaderPipelineStage(), VK_PIPELINE_STAGE_HOST_BIT,
             0, 1, &readback, 0, nullptr, 0, nullptr);
         Submit();
     }

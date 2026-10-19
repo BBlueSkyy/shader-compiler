@@ -56,6 +56,16 @@ public:
         Add(spv::ImageOperandsMask::ConstOffsets, offsets);
     }
 
+    explicit ImageOperands(EmitContext& ctx, Id dx, Id dy, const IR::Value& offset,
+                           Id lod_clamp) {
+        Add(spv::ImageOperandsMask::Grad, dx, dy);
+        AddOffset(ctx, offset);
+        if (Sirit::ValidId(lod_clamp)) {
+            ctx.AddCapability(spv::Capability::MinLod);
+            Add(spv::ImageOperandsMask::MinLod, lod_clamp);
+        }
+    }
+
     explicit ImageOperands(Id lod, Id ms) {
         if (Sirit::ValidId(lod)) {
             Add(spv::ImageOperandsMask::Lod, lod);
@@ -463,8 +473,15 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Value&
         // We can't use implicit lods on non-fragment stages on SPIR-V. Maxwell hardware behaves as
         // if the lod was explicitly zero.  This may change on Turing with implicit compute
         // derivatives
-        const Id lod{ctx.Const(0.0f)};
-        const ImageOperands operands(ctx, false, true, info.has_lod_clamp != 0, lod, offset);
+        Id lod{ctx.Const(0.0f)};
+        if (info.has_lod_clamp != 0) {
+            const Id lod_clamp{info.has_bias != 0 ?
+                ctx.OpCompositeExtract(ctx.F32[1], bias_lc, 1U) : bias_lc};
+            // MinLod is only legal with implicit LOD or Grad operands in SPIR-V.
+            // Non-fragment implicit samples already have explicit LOD zero.
+            lod = ctx.OpFMax(ctx.F32[1], lod, lod_clamp);
+        }
+        const ImageOperands operands(ctx, false, true, false, lod, offset);
         return EmitTexture(&EmitContext::OpImageSparseSampleExplicitLod,
                     &EmitContext::OpImageSampleExplicitLod, ctx, inst,
                     Texture(ctx, info, index), coords, operands.Mask(), operands.Span());
@@ -687,17 +704,29 @@ void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
     for (IR::Block* block : program.post_order_blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             if (!DynamicOperation(inst.GetOpcode())) continue;
-            if (!profile.support_dynamic_texture_handles || stage != Stage::Compute ||
+            if (!profile.support_dynamic_texture_handles ||
                 dynamic_images.empty()) {
-                throw NotImplementedException("Dynamic texture handles require compute descriptor indexing");
+                throw NotImplementedException("Dynamic texture handles require descriptor indexing");
             }
             if (inst.GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)) {
                 throw NotImplementedException("Sparse dynamic texture operations");
+            }
+            const bool implicit_fragment{stage == Stage::Fragment &&
+                inst.GetOpcode() == IR::Opcode::BindlessImageSampleImplicitLod};
+            if (stage == Stage::Fragment && inst.GetOpcode() == IR::Opcode::BindlessImageGather) {
+                throw NotImplementedException("Dynamic fragment gather requires derivatives outside typed dispatch");
             }
             const auto info{inst.Flags<IR::TextureInstInfo>()};
             if (info.type != TextureType::Color2D || info.is_depth ||
                 (inst.GetOpcode() == IR::Opcode::BindlessImageFetch && !inst.Arg(4).IsEmpty())) {
                 throw NotImplementedException("Dynamic textures require non-depth non-MS 2D shape");
+            }
+            if (info.has_lod_clamp != 0 &&
+                (implicit_fragment || inst.GetOpcode() == IR::Opcode::BindlessImageGradient)) {
+                if (!profile.support_min_lod) {
+                    throw NotImplementedException("Dynamic gradient LOD clamp requires shaderResourceMinLod");
+                }
+                AddCapability(spv::Capability::MinLod);
             }
             const auto& group{dynamic_images.at(info.descriptor_index)};
             const bool samplerless{inst.GetOpcode() == IR::Opcode::BindlessImageFetch ||
@@ -710,6 +739,10 @@ void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
                     parameter_types.push_back(DynamicValueType(*this, arg.Type()));
                 }
             }
+            if (implicit_fragment) {
+                parameter_types.push_back(F32[2]);
+                parameter_types.push_back(F32[2]);
+            }
             const Id function{OpFunction(result_type, spv::FunctionControlMask::MaskNone,
                                            TypeFunction(result_type, std::span<const Id>{parameter_types}))};
             Name(function, fmt::format("dynamic_texture_{}", dynamic_functions.size()));
@@ -721,6 +754,8 @@ void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
                     dynamic_parameters[arg.InstRecursive()] = OpFunctionParameter(parameter_types[parameter_index++]);
                 }
             }
+            const Id dx{implicit_fragment ? OpFunctionParameter(F32[2]) : Id{}};
+            const Id dy{implicit_fragment ? OpFunctionParameter(F32[2]) : Id{}};
             AddLabel();
             const Id handle{Def(inst.Arg(0))};
             const Id zero{u32_zero_value};
@@ -750,7 +785,7 @@ void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
             };
             const Id tic{OpBitwiseAnd(U32[1], handle, Const(0xfffffU))};
             reject(OpULessThan(U1, tic, metadata(Const(0U))), 1);
-            reject(OpULessThan(U1, Const(info.descriptor_index), metadata(Const(5U))), 5);
+            reject(OpULessThan(U1, Const(dynamic_group_base + info.descriptor_index), metadata(Const(5U))), 5);
             Id tsc{};
             Id sampler_flags{};
             if (!samplerless) {
@@ -762,7 +797,7 @@ void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
                 sampler_flags = metadata(validity_word);
                 reject(OpINotEqual(U1, OpBitwiseAnd(U32[1], sampler_flags, Const(1U)), zero), 3);
             }
-            const Id map_offset{metadata(Const(8U + info.descriptor_index))};
+            const Id map_offset{metadata(Const(8U + dynamic_group_base + info.descriptor_index))};
             const Id entry{metadata(OpIAdd(U32[1], map_offset, tic))};
             const Id component{OpBitwiseAnd(U32[1], entry, Const(3U))};
             reject(OpULessThan(U1, component, Const(3U)), 4);
@@ -802,7 +837,19 @@ void EmitContext::DefineDynamicTextureFunctions(IR::Program& program) {
                 Id result;
                 switch (inst.GetOpcode()) {
                 case IR::Opcode::BindlessImageSampleImplicitLod:
-                    result = EmitImageSampleImplicitLod(*this, &inst, {}, arg(1), arg(2), inst.Arg(3)); break;
+                    if (implicit_fragment) {
+                        Id lod_clamp{};
+                        if (info.has_lod_clamp != 0) {
+                            lod_clamp = info.has_bias != 0 ? OpCompositeExtract(F32[1], arg(2), 1U) : arg(2);
+                        }
+                        const ImageOperands operands(*this, dx, dy, inst.Arg(3), lod_clamp);
+                        result = EmitTexture(&EmitContext::OpImageSparseSampleExplicitLod,
+                            &EmitContext::OpImageSampleExplicitLod, *this, &inst,
+                            dynamic_sampled_image, arg(1), operands.Mask(), operands.Span());
+                    } else {
+                        result = EmitImageSampleImplicitLod(*this, &inst, {}, arg(1), arg(2), inst.Arg(3));
+                    }
+                    break;
                 case IR::Opcode::BindlessImageSampleExplicitLod:
                     result = EmitImageSampleExplicitLod(*this, &inst, {}, arg(1), arg(2), inst.Arg(3)); break;
                 case IR::Opcode::BindlessImageGather:
@@ -833,6 +880,24 @@ Id EmitContext::DynamicTextureCall(IR::Inst* inst) {
     for (size_t i = 0; i < inst->NumArgs(); ++i) {
         const auto arg{inst->Arg(i)};
         if (!arg.IsEmpty() && !arg.IsImmediate()) arguments.push_back(Def(arg));
+    }
+    if (stage == Stage::Fragment && inst->GetOpcode() == IR::Opcode::BindlessImageSampleImplicitLod) {
+        // Evaluate derivatives at the original instruction, before descriptor guards
+        // and per-numeric-type control flow can diverge between neighboring lanes.
+        const Id coords{Def(inst->Arg(1))};
+        Id dx{OpDPdx(F32[2], coords)};
+        Id dy{OpDPdy(F32[2], coords)};
+        const auto info{inst->Flags<IR::TextureInstInfo>()};
+        if (info.has_bias != 0) {
+            const Id bias_clamp{Def(inst->Arg(2))};
+            const Id bias{info.has_lod_clamp != 0 ? OpCompositeExtract(F32[1], bias_clamp, 0U) : bias_clamp};
+            const Id scale{OpExp2(F32[1], bias)};
+            const Id scale2{OpCompositeConstruct(F32[2], scale, scale)};
+            dx = OpFMul(F32[2], dx, scale2);
+            dy = OpFMul(F32[2], dy, scale2);
+        }
+        arguments.push_back(dx);
+        arguments.push_back(dy);
     }
     return OpFunctionCall(DynamicValueType(*this, inst->Type()), dynamic_functions.at(inst),
                           std::span<const Id>{arguments});

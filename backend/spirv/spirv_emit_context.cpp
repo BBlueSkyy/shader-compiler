@@ -483,7 +483,9 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineGlobalMemoryFunctions(program.info);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
+    dynamic_group_base = bindings.dynamic_texture;
     DefineDynamicTextures(program.info);
+    bindings.dynamic_texture += static_cast<u32>(program.info.dynamic_textures.size());
     DefineDynamicTextureFunctions(program);
 }
 
@@ -1373,8 +1375,8 @@ void EmitContext::DefineDynamicTextures(const Info& info) {
     if (info.dynamic_textures.empty()) {
         return;
     }
-    if (!profile.support_dynamic_texture_handles || stage != Stage::Compute) {
-        throw NotImplementedException("Dynamic texture handles require compute descriptor indexing");
+    if (!profile.support_dynamic_texture_handles) {
+        throw NotImplementedException("Dynamic texture handles require descriptor indexing");
     }
     AddExtension("SPV_EXT_descriptor_indexing");
     AddExtension("SPV_KHR_storage_buffer_storage_class");
@@ -1422,7 +1424,7 @@ void EmitContext::DefineDynamicTextures(const Info& info) {
                 .type = desc.type, .is_depth = desc.is_depth,
                 .component_type = static_cast<TextureComponentType>(component)})};
             const Id id{bind(TypeRuntimeArray(image_type),
-                             spv::StorageClass::UniformConstant, 2 + 3 * group + component)};
+                             spv::StorageClass::UniformConstant, 2 + 3 * (dynamic_group_base + group) + component)};
             Name(id, fmt::format("dynamic_images_{}_{}", group, component));
             definitions[component] = {id, image_type,
                 TypePointer(spv::StorageClass::UniformConstant, image_type),

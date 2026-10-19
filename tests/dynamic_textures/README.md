@@ -1,7 +1,8 @@
 # GPU dynamic texture handle kernels
 
 `dynamic_texture_tests OUTPUT_DIR` uses the production SPIR-V backend to emit
-64-lane compute kernels. `sample.spv`, `fetch.spv`, `query.spv`,
+64-lane compute kernels and matching vertex, tessellation control/evaluation,
+geometry, and fragment modules. `sample.spv`, `fetch.spv`, `query.spv`,
 `transform.spv`, `offset.spv`, and `phi.spv` use SPIR-V 1.3; suffixed modules exercise 1.0
 and 1.4. `transform` reconstructs the full SSBO-loaded handle using masks,
 shifts, and OR; `offset` exercises a nonconstant gather offset passed to the
@@ -53,15 +54,29 @@ map tag, 5 missing group, and 6 incompatible linear-filter sampler/image pair.
 Compact image indices use bits 2 through 30; bit 31 is excluded before indexing. There is no fallback image or sampler access.
 The runtime owns trusted metadata offsets and compact descriptor bounds.
 
-The initial runtime/compiler contract supports non-depth 2D textures in compute
-only. Dynamic TXQ has no instruction shape, so uses the 2D group under this
+The runtime/compiler contract supports non-depth 2D textures in compute and
+all SPIR-V graphics stages. Graphics stages share `Backend::Bindings` while
+compiling in pipeline order. Each stage reserves its dynamic groups through
+`Bindings::dynamic_texture`; IR descriptor indices stay local to that stage.
+Descriptor bindings and metadata map indices use the accumulated global group
+index, and metadata word 5 is the total group count across the pipeline.
+Fragment implicit samples calculate dFdx/dFdy at the original instruction in
+main, pass those derivatives to the helper, and sample with explicit gradients.
+Shader bias scales the gradients by exp2(bias); LOD clamp uses MinLod and requires
+shaderResourceMinLod, as do dynamic explicit-gradient LOD clamps in every stage.
+Dynamic fragment gathers are explicitly unsupported because
+their implicit derivatives cannot run safely inside typed descriptor dispatch.
+The runtime must enable fragmentStoresAndAtomics or vertexPipelineStoresAndAtomics
+for the participating graphics stages because fault reporting writes metadata. Dynamic TXQ has no instruction shape, so uses the 2D group under this
 contract; the runtime explicitly rejects TICs with other shapes. Sparse accesses,
 texture buffers, depth sampling, image writes and atomics are unsupported.
 Both Environment::SupportsDynamicTextureHandles and
 Profile::support_dynamic_texture_handles default to false. The static CBUF
 path remains the first choice for fully representable handles.
 
-`verify.py` runs spirv-val on all kernels and checks runtime array bindings,
+`verify.py` runs spirv-val on all 168 modules (SPIR-V 1.0, 1.3, and 1.4) and
+checks shared stage group offsets, fragment derivatives outside helper divergence,
+runtime array bindings,
 nonuniform decoration, typed control-flow dispatch, samplerless behavior, and
 atomic fault guards. `tests/handle_tracking` also checks opt-in preservation of
 GPU-loaded handles and Phi values with zero host descriptor reads.

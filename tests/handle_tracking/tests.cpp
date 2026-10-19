@@ -306,6 +306,30 @@ int main(int argc,char** argv) {
     gpu_phi.run();
     check(phi_query.Inst()->Arg(0)==phi && gpu_phi.program.info.dynamic_textures.size()==1,
           "dynamic Phi handle was not preserved");
+    for (Stage stage : {Stage::VertexB, Stage::Fragment, Stage::TessellationControl,
+                        Stage::TessellationEval, Stage::Geometry}) {
+        Fixture graphics;
+        graphics.program.stage=stage;
+        graphics.env.dynamic_enabled=true;
+        const auto handle=graphics.storage(IR::Value{0U});
+        const auto sampled=graphics.sample(handle);
+        graphics.run();
+        check(sampled.Inst()->Arg(0)==handle && graphics.program.info.dynamic_textures.size()==1,
+              "graphics dynamic handle was not preserved");
+    }
+    Fixture vertex_a, vertex_b;
+    vertex_a.env.dynamic_enabled=vertex_b.env.dynamic_enabled=true;
+    const auto a_query=vertex_a.query(vertex_a.storage(IR::Value{0U}));
+    const auto b_sample=vertex_b.sample(vertex_b.storage(IR::Value{0U}));
+    vertex_a.run();
+    vertex_b.run();
+    Optimization::JoinDynamicTextureInfo(vertex_a.program, vertex_b.program);
+    check(vertex_a.program.info.dynamic_textures.size()==2 &&
+          vertex_a.program.info.dynamic_textures[0].is_samplerless &&
+          !vertex_a.program.info.dynamic_textures[1].is_samplerless &&
+          a_query.Inst()->Flags<IR::TextureInstInfo>().descriptor_index==0 &&
+          b_sample.Inst()->Flags<IR::TextureInstInfo>().descriptor_index==1,
+          "dual vertex merge lost dynamic groups or source instruction indices");
     Fixture opted_static;
     opted_static.env.dynamic_enabled=true;
     opted_static.query(opted_static.cbuf(0));

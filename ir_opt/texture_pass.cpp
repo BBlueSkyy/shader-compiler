@@ -592,9 +592,6 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 if (!env.SupportsDynamicTextureHandles() || !IsBindless(inst)) {
                     throw;
                 }
-                if (program.stage != Stage::Compute) {
-                    throw NotImplementedException("Dynamic texture handles outside compute");
-                }
                 const auto opcode{IndexedInstruction(inst)};
                 switch (opcode) {
                 case IR::Opcode::ImageSampleImplicitLod:
@@ -800,6 +797,20 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (pixel_format != TexturePixelFormat::OTHER) {
                 PatchTexelFetch(*texture_inst.block, *texture_inst.inst, pixel_format);
             }
+        }
+    }
+}
+
+void JoinDynamicTextureInfo(IR::Program& base, IR::Program& source) {
+    const u32 group_base{static_cast<u32>(base.info.dynamic_textures.size())};
+    base.info.dynamic_textures.insert(base.info.dynamic_textures.end(),
+        source.info.dynamic_textures.begin(), source.info.dynamic_textures.end());
+    for (IR::Block* block : source.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (!IsTextureInstruction(inst) || !IsBindless(inst)) continue;
+            auto flags{inst.Flags<IR::TextureInstInfo>()};
+            flags.descriptor_index.Assign(group_base + flags.descriptor_index);
+            inst.SetFlags(flags);
         }
     }
 }

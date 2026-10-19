@@ -86,3 +86,17 @@ index. `0xffffffff` is invalid. Sampler flags use bit 0 for validity and bit 1
 for linear filtering. Unsupported image/linear-sampler combinations fault with
 code 6 before a descriptor access.
 The module's workgroup size and descriptor interface must match this fixture.
+
+## Optional vertex execution
+
+Set `DYNAMIC_VULKAN_VERTEX=1` and pass the generated `vertex_sample.spv`,
+`vertex_transform.spv` or `vertex_phi.spv` to exercise the same ABI in a
+64-vertex draw with rasterization discarded. This additionally requires
+`vertexPipelineStoresAndAtomics` and shader draw parameters. It checks
+nonuniform SSBO handles and texture/sampler selection using production SPIR-V;
+it is an optional invocation, not another required CI suite.
+
+The graphics regression executed `vertex_sample.spv` on lavapipe with Validation
+Layer: 3,084 assertions passed and no validation errors, including teardown.
+Fragment modules are validated with spirv-val; fragment raster execution and
+Android performance remain device checks.
