@@ -25,6 +25,8 @@ struct ConstBufferAddr {
     u32 secondary_index;
     u32 secondary_offset;
     u32 secondary_shift_left;
+    u32 mask{~0U};
+    u32 secondary_mask{~0U};
     IR::U32 dynamic_offset;
     u32 count;
     bool has_secondary;
@@ -230,6 +232,8 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
             .secondary_index = rhs->index,
             .secondary_offset = rhs->offset,
             .secondary_shift_left = rhs->shift_left,
+            .mask = lhs->mask,
+            .secondary_mask = rhs->mask,
             .dynamic_offset = {},
             .count = 1,
             .has_secondary = true,
@@ -242,10 +246,16 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         }
         std::optional lhs{Track(inst->Arg(0), env)};
         if (lhs) {
-            lhs->shift_left = shift.U32();
+            const u32 amount{shift.U32()};
+            lhs->mask = ShiftTextureHandle(lhs->mask, amount);
+            lhs->shift_left = amount >= 32 ? 32 : std::min(32U, lhs->shift_left + amount);
+            if (lhs->has_secondary) {
+                lhs->secondary_mask = ShiftTextureHandle(lhs->secondary_mask, amount);
+                lhs->secondary_shift_left = amount >= 32 ? 32 :
+                    std::min(32U, lhs->secondary_shift_left + amount);
+            }
         }
         return lhs;
-        break;
     }
     case IR::Opcode::BitwiseAnd32: {
         IR::Value op1{inst->Arg(0)};
@@ -271,10 +281,11 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         }
         std::optional lhs{Track(op1, env)};
         if (lhs) {
-            lhs->shift_left = static_cast<u32>(std::countr_zero(op2.U32()));
+            lhs->mask &= op2.U32();
+            if (lhs->has_secondary)
+                lhs->secondary_mask &= op2.U32();
         }
         return lhs;
-        break;
     }
     case IR::Opcode::GetCbufU32x2:
     case IR::Opcode::GetCbufU32:
@@ -356,24 +367,19 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst) {
     };
 }
 
+u32 ReadTextureHandle(Environment& env, const ConstBufferAddr& cbuf) {
+    const u32 primary{env.ReadCbufValue(cbuf.index, cbuf.offset)};
+    const u32 secondary{cbuf.has_secondary
+        ? env.ReadCbufValue(cbuf.secondary_index, cbuf.secondary_offset) : 0};
+    return EvaluateTextureHandle(cbuf, primary, secondary);
+}
+
 TextureType ReadTextureType(Environment& env, const ConstBufferAddr& cbuf) {
-    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
-    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
-    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset) << cbuf.shift_left};
-    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)
-                      << cbuf.secondary_shift_left};
-    return env.ReadTextureType(lhs_raw | rhs_raw);
+    return env.ReadTextureType(ReadTextureHandle(env, cbuf));
 }
 
 CompareFunction ReadTextureCompareFunc(Environment& env, const ConstBufferAddr& cbuf) {
-    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
-    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
-
-    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset) << cbuf.shift_left};
-    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)
-                      << cbuf.secondary_shift_left};
-
-    return env.ReadTextureCompareFunc(lhs_raw | rhs_raw);
+    return env.ReadTextureCompareFunc(ReadTextureHandle(env, cbuf));
 }
 
 IR::TextureCompareFunc NarrowTextureCompareFunc(CompareFunction func) {
@@ -399,20 +405,15 @@ IR::TextureCompareFunc NarrowTextureCompareFunc(CompareFunction func) {
 }
 
 TexturePixelFormat ReadTexturePixelFormat(Environment& env, const ConstBufferAddr& cbuf) {
-    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
-    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
-    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset)};
-    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)};
-    return env.ReadTexturePixelFormat(lhs_raw | rhs_raw);
+    return env.ReadTexturePixelFormat(ReadTextureHandle(env, cbuf));
 }
 
 bool IsTexturePixelFormatInteger(Environment& env, const ConstBufferAddr& cbuf) {
-    const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
-    const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
-    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset) << cbuf.shift_left};
-    const u32 rhs_raw{env.ReadCbufValue(secondary_index, secondary_offset)
-                      << cbuf.secondary_shift_left};
-    return env.IsTexturePixelFormatInteger(lhs_raw | rhs_raw);
+    return env.IsTexturePixelFormatInteger(ReadTextureHandle(env, cbuf));
+}
+
+TextureComponentType ReadTextureComponentType(Environment& env, const ConstBufferAddr& cbuf) {
+    return env.ReadTextureComponentType(ReadTextureHandle(env, cbuf));
 }
 
 class Descriptors {
@@ -427,10 +428,14 @@ public:
 
     u32 Add(const TextureBufferDescriptor& desc) {
         return Add(texture_buffer_descriptors, desc, [&desc](const auto& existing) {
-            return desc.cbuf_index == existing.cbuf_index &&
+            return desc.component_type == existing.component_type &&
+                   desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset &&
                    desc.secondary_cbuf_index == existing.secondary_cbuf_index &&
                    desc.secondary_cbuf_offset == existing.secondary_cbuf_offset &&
+                   desc.shift_left == existing.shift_left &&
+                   desc.secondary_shift_left == existing.secondary_shift_left &&
+                   desc.mask == existing.mask && desc.secondary_mask == existing.secondary_mask &&
                    desc.count == existing.count && desc.size_shift == existing.size_shift &&
                    desc.has_secondary == existing.has_secondary;
         });
@@ -451,11 +456,16 @@ public:
     u32 Add(const TextureDescriptor& desc) {
         return Add(texture_descriptors, desc, [&desc](const auto& existing) {
             return desc.type == existing.type && desc.is_depth == existing.is_depth &&
+                   desc.component_type == existing.component_type &&
+                   desc.is_samplerless == existing.is_samplerless &&
                    desc.has_secondary == existing.has_secondary &&
                    desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset &&
                    desc.secondary_cbuf_index == existing.secondary_cbuf_index &&
                    desc.secondary_cbuf_offset == existing.secondary_cbuf_offset &&
+                   desc.shift_left == existing.shift_left &&
+                   desc.secondary_shift_left == existing.secondary_shift_left &&
+                   desc.mask == existing.mask && desc.secondary_mask == existing.secondary_mask &&
                    desc.count == existing.count && desc.size_shift == existing.size_shift;
         });
     }
@@ -655,12 +665,15 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (flags.type == TextureType::Buffer) {
                 index = descriptors.Add(TextureBufferDescriptor{
                     .has_secondary = cbuf.has_secondary,
+                    .component_type = ReadTextureComponentType(env, cbuf),
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
                     .shift_left = cbuf.shift_left,
                     .secondary_cbuf_index = cbuf.secondary_index,
                     .secondary_cbuf_offset = cbuf.secondary_offset,
                     .secondary_shift_left = cbuf.secondary_shift_left,
+                    .mask = cbuf.mask,
+                    .secondary_mask = cbuf.secondary_mask,
                     .count = cbuf.count,
                     .size_shift = DESCRIPTOR_SIZE_SHIFT,
                 });
@@ -668,6 +681,9 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 index = descriptors.Add(TextureDescriptor{
                     .type = flags.type,
                     .is_depth = flags.is_depth != 0,
+                    .is_samplerless = inst->GetOpcode() == IR::Opcode::ImageFetch ||
+                                      inst->GetOpcode() == IR::Opcode::ImageQueryDimensions,
+                    .component_type = ReadTextureComponentType(env, cbuf),
                     .has_secondary = cbuf.has_secondary,
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
@@ -675,6 +691,8 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .secondary_cbuf_index = cbuf.secondary_index,
                     .secondary_cbuf_offset = cbuf.secondary_offset,
                     .secondary_shift_left = cbuf.secondary_shift_left,
+                    .mask = cbuf.mask,
+                    .secondary_mask = cbuf.secondary_mask,
                     .count = cbuf.count,
                     .size_shift = DESCRIPTOR_SIZE_SHIFT,
                 });

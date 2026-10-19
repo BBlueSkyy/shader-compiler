@@ -35,11 +35,15 @@ struct TextureDefinition {
     Id pointer_type;
     Id image_type;
     u32 count;
+    bool is_samplerless{};
+    TextureComponentType component_type{};
 };
 
 struct TextureBufferDefinition {
     Id id;
     u32 count;
+    Id image_type;
+    TextureComponentType component_type{};
 };
 
 struct ImageBufferDefinition {

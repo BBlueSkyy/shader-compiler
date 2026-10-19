@@ -27,7 +27,8 @@ enum class Operation {
 
 Id ImageType(EmitContext& ctx, const TextureDescriptor& desc) {
     const spv::ImageFormat format{spv::ImageFormat::Unknown};
-    const Id type{ctx.F32[1]};
+    const Id type{desc.component_type == TextureComponentType::Uint ? ctx.U32[1]
+                  : desc.component_type == TextureComponentType::Sint ? ctx.S32[1] : ctx.F32[1]};
     const bool depth{desc.is_depth};
     switch (desc.type) {
     case TextureType::Color1D:
@@ -1308,11 +1309,13 @@ void EmitContext::DefineTextureBuffers(const Info& info, u32& binding) {
         return;
     }
     const spv::ImageFormat format{spv::ImageFormat::Unknown};
-    image_buffer_type = TypeImage(F32[1], spv::Dim::Buffer, 0U, false, false, 1, format);
-    
-    const Id type{TypePointer(spv::StorageClass::UniformConstant, image_buffer_type)};
+
     texture_buffers.reserve(info.texture_buffer_descriptors.size());
     for (const TextureBufferDescriptor& desc : info.texture_buffer_descriptors) {
+        const Id sampled_type{desc.component_type == TextureComponentType::Uint ? U32[1]
+                              : desc.component_type == TextureComponentType::Sint ? S32[1] : F32[1]};
+        const Id image_type{TypeImage(sampled_type, spv::Dim::Buffer, 0U, false, false, 1, format)};
+        const Id type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         if (desc.count != 1) {
             throw NotImplementedException("Array of texture buffers");
         }
@@ -1323,6 +1326,8 @@ void EmitContext::DefineTextureBuffers(const Info& info, u32& binding) {
         texture_buffers.push_back({
             .id = id,
             .count = desc.count,
+            .image_type = image_type,
+            .component_type = desc.component_type,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
@@ -1362,7 +1367,7 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
     textures.reserve(info.texture_descriptors.size());
     for (const TextureDescriptor& desc : info.texture_descriptors) {
         const Id image_type{ImageType(*this, desc)};
-        const Id sampled_type{TypeSampledImage(image_type)};
+        const Id sampled_type{desc.is_samplerless ? image_type : TypeSampledImage(image_type)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, sampled_type)};
         const Id desc_type{DescType(*this, sampled_type, pointer_type, desc.count)};
         const Id id{AddGlobalVariable(desc_type, spv::StorageClass::UniformConstant)};
@@ -1375,6 +1380,8 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
             .pointer_type = pointer_type,
             .image_type = image_type,
             .count = desc.count,
+            .is_samplerless = desc.is_samplerless,
+            .component_type = desc.component_type,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);

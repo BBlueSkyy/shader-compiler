@@ -29,6 +29,11 @@ public:
 
     [[nodiscard]] virtual bool IsTexturePixelFormatInteger(u32 raw_handle) = 0;
 
+    [[nodiscard]] virtual TextureComponentType ReadTextureComponentType(u32 raw_handle) {
+        return IsTexturePixelFormatInteger(raw_handle) ? TextureComponentType::Uint
+                                                     : TextureComponentType::Float;
+    }
+
     [[nodiscard]] virtual u32 ReadViewportTransformState() = 0;
 
     [[nodiscard]] virtual u32 TextureBoundBuffer() const = 0;

@@ -39,8 +39,15 @@ alias safety.
 This is compiler validation and deterministic instruction execution, not an
 Android device or GPU driver integration test.
 
-The same build also runs the image capability suite through shared backend objects.
-Use `-DTEST_STORAGE_IMAGES=OFF` to build only the subword suite.
+The same build also runs the image capability, fetch operand, texture numeric type,
+and texture handle tracking suites through shared backend objects. The handle
+tracking target runs the production TexturePass on IR under UBSan. The texture
+numeric type suite validates 36 mixed Float/Uint/Sint modules containing 108
+fetch, sample, gather, and gradient operations, including sparse result types
+and bitcasts back to the float-typed register IR.
+Use `-DTEST_STORAGE_IMAGES=OFF -DTEST_IMAGE_FETCH=OFF
+-DTEST_TEXTURE_COMPONENTS=OFF -DTEST_HANDLE_TRACKING=OFF` to build only the
+subword suite.
 
 For a negative control against the original pinned compiler, extract that tree
 and configure another build with `-DCOMPILER_ROOT=/path/to/original/tree` and
