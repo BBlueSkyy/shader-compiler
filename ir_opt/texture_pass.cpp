@@ -10,7 +10,6 @@
 
 #include <shader_compiler/environment.h>
 #include <shader_compiler/frontend/ir/basic_block.h>
-#include <shader_compiler/frontend/ir/breadth_first_search.h>
 #include <shader_compiler/frontend/ir/ir_emitter.h>
 #include <shader_compiler/host_translate_info.h>
 #include <shader_compiler/ir_opt/passes.h>
@@ -181,13 +180,17 @@ bool IsTextureInstruction(const IR::Inst& inst) {
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env);
 
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env) {
-    return IR::BreadthFirstSearch(
-        value, [&env](const IR::Inst* inst) { return TryGetConstBuffer(inst, env); });
+    // A handle is a value expression, not an arbitrary dependency of that value.
+    // In particular, a memory load's address does not describe the loaded handle.
+    // Resolve only identities; TryGetConstBuffer explicitly models every other
+    // supported transformation and must account for all of its value operands.
+    const IR::Inst* const inst{value.TryInstRecursive()};
+    return inst ? TryGetConstBuffer(inst, env) : std::nullopt;
 }
 
-std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
-    const IR::Inst* inst = value.InstRecursive();
-    if (inst->GetOpcode() != IR::Opcode::GetCbufU32) {
+std::optional<u32> TryGetConstantMaskOffset(const IR::Value& value) {
+    const IR::Inst* inst = value.TryInstRecursive();
+    if (!inst || inst->GetOpcode() != IR::Opcode::GetCbufU32) {
         return std::nullopt;
     }
     const IR::Value index{inst->Arg(0)};
@@ -198,18 +201,19 @@ std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
     if (!offset.IsImmediate()) {
         return std::nullopt;
     }
-    const auto index_number = index.U32();
-    if (index_number != 1) {
+    if (index.U32() != 1) {
         return std::nullopt;
     }
-    const auto offset_number = offset.U32();
-    return env.ReadCbufValue(index_number, offset_number);
+    return offset.U32();
 }
 
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env) {
     switch (inst->GetOpcode()) {
     default:
-        return std::nullopt;
+        throw NotImplementedException(
+            "Bindless texture handle provenance through {}: only CBUF values and explicitly "
+            "modelled value transformations are supported; GPU-loaded handles require a "
+            "GPU descriptor lookup path", inst->GetOpcode());
     case IR::Opcode::BitwiseOr32: {
         std::optional lhs{Track(inst->Arg(0), env)};
         std::optional rhs{Track(inst->Arg(1), env)};
@@ -263,29 +267,53 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         if (op1.IsImmediate()) {
             std::swap(op1, op2);
         }
+        std::optional<u32> constant_mask_offset;
         if (!op2.IsImmediate() && !op1.IsImmediate()) {
-            do {
-                auto try_index = TryGetConstant(op1, env);
-                if (try_index) {
-                    op1 = op2;
-                    op2 = IR::Value{*try_index};
-                    break;
-                }
-                auto try_index_2 = TryGetConstant(op2, env);
-                if (try_index_2) {
-                    op2 = IR::Value{*try_index_2};
-                    break;
-                }
+            constant_mask_offset = TryGetConstantMaskOffset(op1);
+            if (constant_mask_offset) {
+                std::swap(op1, op2);
+            } else if ((constant_mask_offset = TryGetConstantMaskOffset(op2));
+                       !constant_mask_offset) {
                 return std::nullopt;
-            } while (false);
+            }
         }
         std::optional lhs{Track(op1, env)};
         if (lhs) {
-            lhs->mask &= op2.U32();
+            // A recognized static mask is a value, but its partner may still be
+            // a GPU load. Validate that partner before reading the mask CBUF.
+            const u32 mask{constant_mask_offset ? env.ReadCbufValue(1, *constant_mask_offset)
+                                              : op2.U32()};
+            lhs->mask &= mask;
             if (lhs->has_secondary)
-                lhs->secondary_mask &= op2.U32();
+                lhs->secondary_mask &= mask;
         }
         return lhs;
+    }
+    case IR::Opcode::CompositeExtractU32x2: {
+        const IR::Value component{inst->Arg(1)};
+        if (!component.IsImmediate() || component.U32() >= 2) {
+            return std::nullopt;
+        }
+        const IR::Inst* const source{inst->Arg(0).TryInstRecursive()};
+        if (!source) {
+            return std::nullopt;
+        }
+        const u32 lane{component.U32()};
+        if (source->GetOpcode() == IR::Opcode::CompositeConstructU32x2) {
+            // Only the selected value contributes, not the other vector lanes.
+            return Track(source->Arg(lane), env);
+        }
+        if (source->GetOpcode() != IR::Opcode::GetCbufU32x2) {
+            return std::nullopt;
+        }
+        auto addr{TryGetConstBuffer(source, env)};
+        if (addr) {
+            if (addr->offset > std::numeric_limits<u32>::max() - lane * sizeof(u32)) {
+                return std::nullopt;
+            }
+            addr->offset += lane * static_cast<u32>(sizeof(u32));
+        }
+        return addr;
     }
     case IR::Opcode::GetCbufU32x2:
     case IR::Opcode::GetCbufU32:
@@ -344,7 +372,9 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst) {
     if (IsBindless(inst)) {
         const std::optional<ConstBufferAddr> track_addr{Track(inst.Arg(0), env)};
         if (!track_addr) {
-            throw NotImplementedException("Failed to track bindless texture constant buffer");
+            throw NotImplementedException(
+                "Unsupported bindless texture handle expression: the complete value must be "
+                "representable by CBUF descriptors; GPU-loaded handles need GPU descriptor lookup");
         }
         addr = *track_addr;
     } else {

@@ -40,12 +40,15 @@ if(TEST_HANDLE_TRACKING)
     add_executable(handle_tracking_tests ../handle_tracking/tests.cpp
         ${COMPILER_ROOT}/ir_opt/texture_pass.cpp ${COMPILER_ROOT}/frontend/ir/ir_emitter.cpp)
     target_link_libraries(handle_tracking_tests PRIVATE shader_backend_tests)
+    target_compile_definitions(handle_tracking_tests PRIVATE TEST_HANDLE_SPIRV)
     target_compile_options(handle_tracking_tests PRIVATE -fsanitize=undefined -fno-sanitize-recover=all)
     target_link_options(handle_tracking_tests PRIVATE -fsanitize=undefined)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(handle_tracking_tests PRIVATE -Werror=conversion)
     endif()
-    add_test(NAME handle_tracking COMMAND handle_tracking_tests)
+    add_test(NAME handle_tracking COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../handle_tracking/verify.py $<TARGET_FILE:handle_tracking_tests>
+        ${SPIRV_VAL} ${CMAKE_CURRENT_BINARY_DIR}/handle-modules)
 endif()
 
 option(TEST_IMAGE_FETCH "Build texture fetch operand regression suite" ON)

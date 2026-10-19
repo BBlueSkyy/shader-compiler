@@ -13,3 +13,9 @@ different transformations of the same source remain separate descriptors.
 
 These are host compiler tests. They do not execute guest shaders or establish
 game rendering correctness on a Vulkan device.
+
+The suite additionally checks semantic provenance across memory-value boundaries,
+selected CBUF-pair lanes, unsupported expressions and descriptor preservation.
+The shared suite validates 57 supported-expression SPIR-V modules with
+`spirv-val`. See [PROVENANCE.md](PROVENANCE.md) for the captured failure,
+reference comparison and explicit lack of dynamic SSBO-handle support.
