@@ -8,7 +8,6 @@
 
 #include <boost/container/small_vector.hpp>
 
-#include <shader_compiler/common/log.h>
 #include <shader_compiler/environment.h>
 #include <shader_compiler/frontend/ir/basic_block.h>
 #include <shader_compiler/frontend/ir/breadth_first_search.h>
@@ -558,30 +557,14 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 to_replace.push_back(MakeInst(env, block, inst));
             }
         }
-    } catch (const BindlessTextureTrackingError&) {
-        // The collection loop has not rewritten any texture instruction yet.
-        // No snapshots, strings or logs are created for successful translation.
+    } catch (BindlessTextureTrackingError& error) {
+        // Preserve the IR until the host can record shader identity first. Logging
+        // asynchronously here can lose both the tail and the original exception
+        // when the producer thread/process exits before its queue drains.
         try {
-            const auto dump{IR::DumpProgram(program)};
-            constexpr size_t MaxBytes{2 * 1024 * 1024};
-            constexpr size_t ChunkBytes{768};
-            const size_t captured{std::min(dump.size(), MaxBytes)};
-            LOG_ERROR(Shader, "BindlessTrackingIRBegin: bytes={} captured={} truncated={}",
-                      dump.size(), captured, dump.size() > captured);
-            constexpr char Hex[]{"0123456789ABCDEF"};
-            for (size_t offset{}; offset < captured; offset += ChunkBytes) {
-                const size_t count{std::min(ChunkBytes, captured - offset)};
-                std::string hex(count * 2, '0');
-                for (size_t i{}; i < count; ++i) {
-                    const auto byte{static_cast<unsigned char>(dump[offset + i])};
-                    hex[2 * i] = Hex[byte >> 4];
-                    hex[2 * i + 1] = Hex[byte & 15];
-                }
-                LOG_ERROR(Shader, "BindlessTrackingIRChunk: offset={} hex={}", offset, hex);
-            }
-            LOG_ERROR(Shader, "BindlessTrackingIREnd: captured={}", captured);
+            error.SetDiagnosticIR(IR::DumpProgram(program));
         } catch (...) {
-            // Diagnostic allocation or logging must not replace the original failure.
+            // Diagnostic allocation must not replace the original failure.
         }
         throw;
     }
