@@ -328,11 +328,59 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
     };
 }
 
+// Recover a full-word CBUF handle spilled and reloaded within one basic block.
+// Called only after the existing static tracker fails. Unknown aliases, other
+// value expressions and inter-block memory flow still require real support.
+std::optional<ConstBufferAddr> TrackLocalCbufSpill(const IR::Value& handle,
+                                                IR::Block& block, Environment& env) {
+    const IR::Inst* const load{handle.TryInstRecursive()};
+    if (!load || load->GetOpcode() != IR::Opcode::LoadLocal) {
+        return std::nullopt;
+    }
+    const IR::Value offset{load->Arg(0).Resolve()};
+    if (!offset.IsImmediate() || offset.U32() >= env.LocalMemorySize() / sizeof(u32)) {
+        return std::nullopt;
+    }
+    auto& instructions{block.Instructions()};
+    auto it{std::find_if(instructions.begin(), instructions.end(),
+                        [load](const IR::Inst& candidate) { return &candidate == load; })};
+    if (it == instructions.end()) {
+        return std::nullopt;
+    }
+    // Search at the load, not at the texture operation: later writes cannot
+    // change the value already loaded into SSA.
+    while (it != instructions.begin()) {
+        const IR::Inst& candidate{*--it};
+        if (candidate.GetOpcode() != IR::Opcode::WriteLocal) {
+            continue;
+        }
+        const IR::Value written_offset{candidate.Arg(0).Resolve()};
+        if (!written_offset.IsImmediate()) {
+            return std::nullopt; // This store may alias the loaded word.
+        }
+        if (written_offset.U32() != offset.U32()) {
+            continue;
+        }
+        const IR::Inst* const source{candidate.Arg(1).TryInstRecursive()};
+        if (!source || source->GetOpcode() != IR::Opcode::GetCbufU32 ||
+            !source->Arg(0).IsImmediate() || !source->Arg(1).IsImmediate()) {
+            return std::nullopt;
+        }
+        // Model the stored value exactly. Never search a memory load's address
+        // for a CBUF and mistake that address for the loaded handle.
+        return TryGetConstBuffer(source, env);
+    }
+    return std::nullopt;
+}
+
 TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst) {
     ConstBufferAddr addr;
     if (IsBindless(inst)) {
         const std::optional<ConstBufferAddr> track_addr{Track(inst.Arg(0), env)};
-        if (!track_addr) {
+        if (!track_addr) [[unlikely]] {
+            if (const auto spilled{TrackLocalCbufSpill(inst.Arg(0), *block, env)}) {
+                return TextureInst{.cbuf = *spilled, .inst = &inst, .block = block};
+            }
             const auto* handle{inst.Arg(0).TryInstRecursive()};
             const auto flags{inst.Flags<IR::TextureInstInfo>()};
             throw BindlessTextureTrackingError(
