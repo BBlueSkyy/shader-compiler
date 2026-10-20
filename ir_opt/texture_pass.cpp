@@ -8,6 +8,7 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include <shader_compiler/common/log.h>
 #include <shader_compiler/environment.h>
 #include <shader_compiler/frontend/ir/basic_block.h>
 #include <shader_compiler/frontend/ir/breadth_first_search.h>
@@ -333,7 +334,14 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst) {
     if (IsBindless(inst)) {
         const std::optional<ConstBufferAddr> track_addr{Track(inst.Arg(0), env)};
         if (!track_addr) {
-            throw NotImplementedException("Failed to track bindless texture constant buffer");
+            const auto* handle{inst.Arg(0).TryInstRecursive()};
+            const auto flags{inst.Flags<IR::TextureInstInfo>()};
+            throw BindlessTextureTrackingError(
+                "Failed to track bindless texture constant buffer: textureInst=0x{:X} "
+                "handleInst=0x{:X} opcode={} handleOpcode={} type={} depth={} flags=0x{:08X}",
+                reinterpret_cast<uintptr_t>(&inst), reinterpret_cast<uintptr_t>(handle),
+                inst.GetOpcode(), handle ? handle->GetOpcode() : IR::Opcode::Void,
+                static_cast<u32>(flags.type.Value()), flags.is_depth.Value(), inst.Flags<u32>());
         }
         addr = *track_addr;
     } else {
@@ -541,13 +549,41 @@ void PatchTexelFetch(IR::Block& block, IR::Inst& inst, TexturePixelFormat pixel_
 
 void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info) {
     TextureInstVector to_replace;
-    for (IR::Block* const block : program.post_order_blocks) {
-        for (IR::Inst& inst : block->Instructions()) {
-            if (!IsTextureInstruction(inst)) {
-                continue;
+    try {
+        for (IR::Block* const block : program.post_order_blocks) {
+            for (IR::Inst& inst : block->Instructions()) {
+                if (!IsTextureInstruction(inst)) {
+                    continue;
+                }
+                to_replace.push_back(MakeInst(env, block, inst));
             }
-            to_replace.push_back(MakeInst(env, block, inst));
         }
+    } catch (const BindlessTextureTrackingError&) {
+        // The collection loop has not rewritten any texture instruction yet.
+        // No snapshots, strings or logs are created for successful translation.
+        try {
+            const auto dump{IR::DumpProgram(program)};
+            constexpr size_t MaxBytes{2 * 1024 * 1024};
+            constexpr size_t ChunkBytes{768};
+            const size_t captured{std::min(dump.size(), MaxBytes)};
+            LOG_ERROR(Shader, "BindlessTrackingIRBegin: bytes={} captured={} truncated={}",
+                      dump.size(), captured, dump.size() > captured);
+            constexpr char Hex[]{"0123456789ABCDEF"};
+            for (size_t offset{}; offset < captured; offset += ChunkBytes) {
+                const size_t count{std::min(ChunkBytes, captured - offset)};
+                std::string hex(count * 2, '0');
+                for (size_t i{}; i < count; ++i) {
+                    const auto byte{static_cast<unsigned char>(dump[offset + i])};
+                    hex[2 * i] = Hex[byte >> 4];
+                    hex[2 * i + 1] = Hex[byte & 15];
+                }
+                LOG_ERROR(Shader, "BindlessTrackingIRChunk: offset={} hex={}", offset, hex);
+            }
+            LOG_ERROR(Shader, "BindlessTrackingIREnd: captured={}", captured);
+        } catch (...) {
+            // Diagnostic allocation or logging must not replace the original failure.
+        }
+        throw;
     }
     // Sort instructions to visit textures by constant buffer index, then by offset
     ranges::sort(to_replace, [](const auto& lhs, const auto& rhs) {

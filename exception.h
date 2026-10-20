@@ -54,6 +54,12 @@ public:
     }
 };
 
+// Allows hosts to capture only this unresolved translation failure.
+class BindlessTextureTrackingError : public NotImplementedException {
+public:
+    using NotImplementedException::NotImplementedException;
+};
+
 class InvalidArgument : public Exception {
 public:
     template <typename... Args>
