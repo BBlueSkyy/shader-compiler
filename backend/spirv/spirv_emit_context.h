@@ -205,6 +205,7 @@ public:
 
     Id output_f32{};
     Id output_u32{};
+    Id output_s32{};
 
     Id image_buffer_type{};
     Id sampled_texture_buffer_type{};

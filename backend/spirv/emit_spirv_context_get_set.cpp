@@ -485,7 +485,20 @@ void EmitSetPatch(EmitContext& ctx, IR::Patch patch, Id value) {
 
 void EmitSetFragColor(EmitContext& ctx, u32 index, u32 component, Id value) {
     const Id component_id{ctx.Const(component)};
-    const Id pointer{ctx.OpAccessChain(ctx.output_f32, ctx.frag_color.at(index), component_id)};
+    Id pointer_type{ctx.output_f32};
+    switch (ctx.runtime_info.fragment_color_types.at(index)) {
+    case AttributeType::UnsignedInt:
+        pointer_type = ctx.output_u32;
+        value = ctx.OpBitcast(ctx.U32[1], value);
+        break;
+    case AttributeType::SignedInt:
+        pointer_type = ctx.output_s32;
+        value = ctx.OpBitcast(ctx.S32[1], value);
+        break;
+    default:
+        break;
+    }
+    const Id pointer{ctx.OpAccessChain(pointer_type, ctx.frag_color.at(index), component_id)};
     ctx.OpStore(pointer, value);
 }
 

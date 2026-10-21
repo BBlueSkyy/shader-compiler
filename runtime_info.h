@@ -62,6 +62,7 @@ struct TransformFeedbackVarying {
 
 struct RuntimeInfo {
     std::array<AttributeType, 32> generic_input_types{};
+    std::array<AttributeType, 8> fragment_color_types{};
     VaryingState previous_stage_stores;
     std::map<IR::Attribute, IR::Attribute> previous_stage_legacy_stores_mapping;
 
