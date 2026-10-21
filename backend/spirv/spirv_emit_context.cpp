@@ -1265,7 +1265,9 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
             throw NotImplementedException("Array of image buffers");
         }
         const spv::ImageFormat format{GetImageFormat(desc.format)};
-        const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
+        // R32_UINT bindings use a typed R32ui view even when the TIC is typeless.
+        const bool is_integer{desc.is_integer || desc.format == ImageFormat::R32_UINT};
+        const Id sampled_type{is_integer ? U32[1] : F32[1]};
         const Id image_type{TypeImage(sampled_type, spv::Dim::Buffer, false, false, false, 2, format)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
@@ -1276,7 +1278,7 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
             .id = id,
             .image_type = image_type,
             .count = desc.count,
-            .is_integer = desc.is_integer,
+            .is_integer = is_integer,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
