@@ -526,7 +526,7 @@ Id EmitImageFetch(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id c
             }
             break;
         default:
-            throw NotImplementedException("Image fetch offset on texture type {}", info.type);
+            throw NotImplementedException("Image fetch offset on texture type {}", static_cast<u32>(info.type.Value()));
         }
     }
     const ImageOperands operands(Id{}, lod, ms);
