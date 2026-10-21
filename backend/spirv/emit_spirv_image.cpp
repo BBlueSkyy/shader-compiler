@@ -497,7 +497,39 @@ Id EmitImageFetch(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id c
     if (info.type == TextureType::Buffer) {
         lod = Id{};
     }
-    const ImageOperands operands(offset, lod, ms);
+    // Vulkan does not allow the Offset operand on OpImageFetch. Apply the
+    // signed integer offset to spatial coordinates, leaving array layers intact.
+    if (Sirit::ValidId(offset)) {
+        switch (info.type) {
+        case TextureType::Color1D:
+        case TextureType::Buffer:
+            coords = ctx.OpIAdd(ctx.U32[1], coords, offset);
+            break;
+        case TextureType::Color2D:
+        case TextureType::Color2DRect:
+            coords = ctx.OpIAdd(ctx.U32[2], coords, offset);
+            break;
+        case TextureType::Color3D:
+            coords = ctx.OpIAdd(ctx.U32[3], coords, offset);
+            break;
+        case TextureType::ColorArray1D: {
+            const Id x{ctx.OpIAdd(ctx.U32[1], ctx.OpCompositeExtract(ctx.U32[1], coords, 0U), offset)};
+            coords = ctx.OpCompositeInsert(ctx.U32[2], x, coords, 0U);
+            break;
+        }
+        case TextureType::ColorArray2D:
+            for (u32 component = 0; component < 2; ++component) {
+                const Id value{ctx.OpIAdd(ctx.U32[1],
+                    ctx.OpCompositeExtract(ctx.U32[1], coords, component),
+                    ctx.OpCompositeExtract(ctx.U32[1], offset, component))};
+                coords = ctx.OpCompositeInsert(ctx.U32[3], value, coords, component);
+            }
+            break;
+        default:
+            throw NotImplementedException("Image fetch offset on texture type {}", info.type);
+        }
+    }
+    const ImageOperands operands(Id{}, lod, ms);
     return Emit(&EmitContext::OpImageSparseFetch, &EmitContext::OpImageFetch, ctx, inst, ctx.F32[4],
                 TextureImage(ctx, info, index), coords, operands.MaskOptional(), operands.Span());
 }
