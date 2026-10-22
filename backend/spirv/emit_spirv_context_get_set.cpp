@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -112,7 +115,8 @@ Id GetCbuf(EmitContext& ctx, Id result_type, Id UniformDefinitions::*member_ptr,
     } else if (element_size > 1) {
         const u32 log2_element_size{static_cast<u32>(std::countr_zero(element_size))};
         const Id shift{ctx.Const(log2_element_size)};
-        buffer_offset = ctx.OpShiftRightArithmetic(ctx.U32[1], ctx.Def(offset), shift);
+        // Dynamic CBUF byte offsets are unsigned; do not sign-extend them.
+        buffer_offset = ctx.OpShiftRightLogical(ctx.U32[1], ctx.Def(offset), shift);
     } else {
         buffer_offset = ctx.Def(offset);
     }
@@ -143,7 +147,7 @@ Id GetCbufElement(EmitContext& ctx, Id vector, const IR::Value& offset, u32 inde
         const u32 element{(offset.U32() / 4) % 4 + index_offset};
         return ctx.OpCompositeExtract(ctx.U32[1], vector, element);
     }
-    const Id shift{ctx.OpShiftRightArithmetic(ctx.U32[1], ctx.Def(offset), ctx.Const(2u))};
+    const Id shift{ctx.OpShiftRightLogical(ctx.U32[1], ctx.Def(offset), ctx.Const(2u))};
     Id element{ctx.OpBitwiseAnd(ctx.U32[1], shift, ctx.Const(3u))};
     if (index_offset > 0) {
         element = ctx.OpIAdd(ctx.U32[1], element, ctx.Const(index_offset));

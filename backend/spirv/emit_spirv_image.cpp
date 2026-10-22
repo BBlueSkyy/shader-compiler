@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -47,12 +50,16 @@ public:
         if (opcode != values[1]->GetOpcode() || opcode != IR::Opcode::CompositeConstructU32x4) {
             throw LogicError("Invalid PTP arguments");
         }
-        auto read{[&](unsigned int a, unsigned int b) { return values[a]->Arg(b).U32(); }};
+        // SPIR-V ConstOffsets operands are signed integer vectors. Maxwell
+        // encodes negative offsets in two's complement.
+        auto read{[&](unsigned int a, unsigned int b) {
+            return static_cast<s32>(values[a]->Arg(b).U32());
+        }};
 
         const Id offsets{ctx.ConstantComposite(
-            ctx.TypeArray(ctx.U32[2], ctx.Const(4U)), ctx.Const(read(0, 0), read(0, 1)),
-            ctx.Const(read(0, 2), read(0, 3)), ctx.Const(read(1, 0), read(1, 1)),
-            ctx.Const(read(1, 2), read(1, 3)))};
+            ctx.TypeArray(ctx.S32[2], ctx.Const(4U)), ctx.SConst(read(0, 0), read(0, 1)),
+            ctx.SConst(read(0, 2), read(0, 3)), ctx.SConst(read(1, 0), read(1, 1)),
+            ctx.SConst(read(1, 2), read(1, 3)))};
         Add(spv::ImageOperandsMask::ConstOffsets, offsets);
     }
 
@@ -242,8 +249,13 @@ Id IsScaled(EmitContext& ctx, const IR::Value& index, Id member_index, u32 base_
         if (base_index != 0) {
             index_value = ctx.OpIAdd(ctx.U32[1], index_value, ctx.Const(base_index));
         }
+        const Id word_index{ctx.OpShiftRightLogical(ctx.U32[1], index_value, ctx.Const(5u))};
         const Id bit_index{ctx.OpBitwiseAnd(ctx.U32[1], index_value, ctx.Const(31u))};
-        bit = ctx.OpBitFieldUExtract(ctx.U32[1], index_value, bit_index, ctx.Const(1u));
+        const Id pointer{ctx.OpAccessChain(push_constant_u32, ctx.rescaling_push_constants,
+                                           member_index, word_index)};
+        const Id word{ctx.OpLoad(ctx.U32[1], pointer)};
+        const Id bit_index_mask{ctx.OpShiftLeftLogical(ctx.U32[1], ctx.Const(1u), bit_index)};
+        bit = ctx.OpBitwiseAnd(ctx.U32[1], word, bit_index_mask);
     }
     return ctx.OpINotEqual(ctx.U1, bit, ctx.u32_zero_value);
 }
