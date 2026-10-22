@@ -8,14 +8,22 @@
 namespace Shader::Backend::SPIRV {
 namespace {
 Id Image(EmitContext& ctx, const IR::Value& index, IR::TextureInstInfo info) {
-    if (!index.IsImmediate()) {
+    // TexturePass stores the descriptor in the flags; index is only an array
+    // element and is empty for the supported scalar descriptors.
+    if (!index.IsEmpty() && (!index.IsImmediate() || index.U32() != 0)) {
         throw NotImplementedException("Indirect image indexing");
     }
     if (info.type == TextureType::Buffer) {
-        const ImageBufferDefinition def{ctx.image_buffers.at(index.U32())};
+        const ImageBufferDefinition& def{ctx.image_buffers.at(info.descriptor_index)};
+        if (def.count != 1) {
+            throw NotImplementedException("Array of atomic image buffers");
+        }
         return def.id;
     } else {
-        const ImageDefinition def{ctx.images.at(index.U32())};
+        const ImageDefinition& def{ctx.images.at(info.descriptor_index)};
+        if (def.count != 1) {
+            throw NotImplementedException("Array of atomic images");
+        }
         return def.id;
     }
 }

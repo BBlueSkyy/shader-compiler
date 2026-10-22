@@ -54,6 +54,23 @@ public:
     }
 };
 
+// Allows hosts to capture only this unresolved translation failure.
+class BindlessTextureTrackingError : public NotImplementedException {
+public:
+    using NotImplementedException::NotImplementedException;
+
+    void SetDiagnosticIR(std::string ir) noexcept {
+        diagnostic_ir = std::move(ir);
+    }
+
+    [[nodiscard]] const std::string& DiagnosticIR() const noexcept {
+        return diagnostic_ir;
+    }
+
+private:
+    std::string diagnostic_ir;
+};
+
 class InvalidArgument : public Exception {
 public:
     template <typename... Args>
