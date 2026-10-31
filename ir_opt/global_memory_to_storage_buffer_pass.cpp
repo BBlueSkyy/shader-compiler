@@ -3,6 +3,8 @@
 
 #include <range/v3/algorithm.hpp>
 #include <optional>
+#include <algorithm>
+#include <vector>
 
 #include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
@@ -392,48 +394,52 @@ struct AffineOffsetRange : ComputeStorageBufferAccessRange {
 };
 
 std::optional<AffineOffsetRange> TrackOffsetRange(const IR::Value& value,
-                                                StorageBufferAddr pointer, u32& budget, u32 depth = 0) {
+                                                StorageBufferAddr pointer, u32& budget, std::string* failure, u32 depth = 0) {
+    const auto fail = [&](std::string reason) -> std::optional<AffineOffsetRange> {
+        if (failure && failure->empty()) *failure = std::move(reason);
+        return std::nullopt;
+    };
     constexpr u64 limit{1ULL << 32};
-    if (depth > 64 || !budget) return std::nullopt;
+    if (depth > 64 || !budget) return fail("traversal_budget");
     --budget; // Shared SSA subtrees must not cause exponential traversal.
     AffineOffsetRange result;
     result.known = true;
     if (value.IsImmediate()) {
-        if (value.Type() != IR::Type::U32) return std::nullopt;
+        if (value.Type() != IR::Type::U32) return fail("unsupported_shape");
         result.constant = value.U32();
         return result;
     }
     const IR::Inst* inst{value.InstRecursive()};
     switch (inst->GetOpcode()) {
     case IR::Opcode::GetCbufU32:
-        if (!inst->Arg(0).IsImmediate() || !inst->Arg(1).IsImmediate()) return std::nullopt;
+        if (!inst->Arg(0).IsImmediate() || !inst->Arg(1).IsImmediate()) return fail("unsupported_shape");
         if (inst->Arg(0).U32() == pointer.index && inst->Arg(1).U32() == pointer.offset)
             result.pointer_coefficient = 1;
         else result.constant = limit - 1; // Other cbuf values are U32 parameters, not pointer bases.
         return result;
     case IR::Opcode::CompositeExtractU32x3: {
-        if (!inst->Arg(1).IsImmediate() || inst->Arg(0).IsImmediate()) return std::nullopt;
+        if (!inst->Arg(1).IsImmediate() || inst->Arg(0).IsImmediate()) return fail("unsupported_shape");
         const auto axis{inst->Arg(1).U32()};
-        if (axis >= 3) return std::nullopt;
+        if (axis >= 3) return fail("unsupported_shape");
         const auto vector_op{inst->Arg(0).InstRecursive()->GetOpcode()};
         if (vector_op == IR::Opcode::WorkgroupId) result.workgroup[axis] = 1;
         else if (vector_op == IR::Opcode::LocalInvocationId) result.local[axis] = 1;
-        else return std::nullopt;
+        else return fail("unsupported_shape");
         return result;
     }
     case IR::Opcode::IAdd32:
     case IR::Opcode::IMul32:
     case IR::Opcode::ShiftLeftLogical32: {
-        auto lhs{TrackOffsetRange(inst->Arg(0), pointer, budget, depth + 1)};
+        auto lhs{TrackOffsetRange(inst->Arg(0), pointer, budget, failure, depth + 1)};
         if (!lhs) return std::nullopt;
         std::optional<AffineOffsetRange> rhs;
         if (inst->GetOpcode() == IR::Opcode::ShiftLeftLogical32) {
-            if (!inst->Arg(1).IsImmediate() || inst->Arg(1).U32() >= 32) return std::nullopt;
+            if (!inst->Arg(1).IsImmediate() || inst->Arg(1).U32() >= 32) return fail("unsupported_shape");
             rhs = AffineOffsetRange{};
             rhs->known = true;
             rhs->constant = 1ULL << inst->Arg(1).U32();
         } else {
-            rhs = TrackOffsetRange(inst->Arg(1), pointer, budget, depth + 1);
+            rhs = TrackOffsetRange(inst->Arg(1), pointer, budget, failure, depth + 1);
         }
         if (!rhs) return std::nullopt;
         auto has_axes = [](const ComputeStorageBufferAccessRange& range) {
@@ -443,7 +449,7 @@ std::optional<AffineOffsetRange> TrackOffsetRange(const IR::Value& value,
         };
         if (inst->GetOpcode() != IR::Opcode::IAdd32) {
             if (has_axes(*rhs) || rhs->pointer_coefficient) std::swap(lhs, rhs);
-            if (has_axes(*rhs) || rhs->pointer_coefficient) return std::nullopt; // Not an affine product.
+            if (has_axes(*rhs) || rhs->pointer_coefficient) return fail("non_affine_product"); // Not an affine product.
             const u64 factor{rhs->constant};
             auto mul = [factor](u64 x) { return factor && x > limit / factor ? limit : x * factor; };
             lhs->constant = mul(lhs->constant);
@@ -462,7 +468,7 @@ std::optional<AffineOffsetRange> TrackOffsetRange(const IR::Value& value,
         }
         return lhs;
     }
-    default: return std::nullopt;
+    default: return fail(fmt::format("unsupported_opcode:{}", inst->GetOpcode()));
     }
 }
 
@@ -479,16 +485,66 @@ u32 GlobalAccessWidth(IR::Opcode opcode) {
     }
 }
 
-ComputeStorageBufferAccessRange CollectAccessRange(StorageBufferAddr pointer, const StorageInfo& info) {
+// Bounded SSA address DAG, preserving shared nodes and Phi cycles. Collected once
+// during translation, before replacement destroys the original global address.
+std::string DiagnosticAddress(const IR::Inst* access) {
+    constexpr size_t MaxNodes{128}, MaxArgs{16};
+    std::vector<const IR::Inst*> nodes;
+    bool truncated{};
+    const auto value = [&](const IR::Value& arg) -> std::string {
+        if (arg.IsEmpty()) return "null";
+        if (!arg.IsImmediate()) {
+            const auto* inst{arg.Inst()};
+            auto it{std::find(nodes.begin(), nodes.end(), inst)};
+            if (it == nodes.end()) {
+                if (nodes.size() == MaxNodes) { truncated = true; return "truncated"; }
+                nodes.push_back(inst);
+                return fmt::format("n{}", nodes.size() - 1);
+            }
+            return fmt::format("n{}", std::distance(nodes.begin(), it));
+        }
+        switch (arg.Type()) {
+        case IR::Type::U1: return fmt::format("#{}", arg.U1());
+        case IR::Type::U8: return fmt::format("#{}", arg.U8());
+        case IR::Type::U16: return fmt::format("#{}", arg.U16());
+        case IR::Type::U32: return fmt::format("#0x{:X}", arg.U32());
+        case IR::Type::U64: return fmt::format("#0x{:X}", arg.U64());
+        case IR::Type::F32: return fmt::format("#{}", arg.F32());
+        case IR::Type::F64: return fmt::format("#{}", arg.F64());
+        default: return fmt::format("immediate_type:{}", arg.Type());
+        }
+    };
+    std::string result{fmt::format("address={};", value(access->Arg(0)))};
+    for (size_t i{}; i < nodes.size(); ++i) {
+        const auto* inst{nodes[i]};
+        result += fmt::format("n{}={}(", i, inst->GetOpcode());
+        for (size_t a{}; a < std::min(inst->NumArgs(), MaxArgs); ++a)
+            result += (a ? "," : "") + value(inst->Arg(a));
+        if (inst->NumArgs() > MaxArgs) { result += ",truncated_args"; truncated = true; }
+        result += ");";
+    }
+    return result + fmt::format("dag_truncated={}", truncated);
+}
+
+ComputeStorageBufferAccessRange CollectAccessRange(StorageBufferAddr pointer, const StorageInfo& info, std::string* diagnostic) {
     ComputeStorageBufferAccessRange result{.known = true};
     for (const auto& access : info.to_replace) {
         if (access.storage_buffer != pointer) continue;
         const auto low{TrackLowAddress(access.inst)};
         const auto width{GlobalAccessWidth(access.inst->GetOpcode())};
-        if (!low || low->imm_offset < 0 || !width) return {};
+        const auto fail = [&](std::string reason) -> ComputeStorageBufferAccessRange {
+            if (diagnostic) *diagnostic = fmt::format("reason={} access={} imm={} {}", reason,
+                access.inst->GetOpcode(), low ? low->imm_offset : 0, DiagnosticAddress(access.inst));
+            return {};
+        };
+        if (!low) return fail("low_address");
+        if (low->imm_offset < 0) return fail("negative_immediate");
+        if (!width) return fail("unsupported_access_width");
         u32 budget{512};
-        auto range{TrackOffsetRange(low->value, pointer, budget)};
-        if (!range || range->pointer_coefficient != 1) return {};
+        std::string reason;
+        auto range{TrackOffsetRange(low->value, pointer, budget, diagnostic ? &reason : nullptr)};
+        if (!range) return fail(reason);
+        if (range->pointer_coefficient != 1) return fail(fmt::format("pointer_coefficient:{}", range->pointer_coefficient));
         range->constant += static_cast<u32>(low->imm_offset) + width;
         result.constant = (std::max)(result.constant, range->constant);
         for (size_t axis{}; axis < 3; ++axis) {
@@ -662,14 +718,18 @@ void GlobalMemoryToStorageBufferPass(IR::Program& program, const HostTranslateIn
         }
     }
     for (const StorageBufferAddr& storage_buffer : info.set) {
+        std::string diagnostic;
+        const auto access_range{program.stage == Stage::Compute ? CollectAccessRange(storage_buffer, info, &diagnostic)
+                                                               : ComputeStorageBufferAccessRange{}};
+        if (!diagnostic.empty()) program.info.compute_ssbo_diagnostics.push_back({
+            storage_buffer.index, storage_buffer.offset, std::move(diagnostic)});
         program.info.storage_buffers_descriptors.push_back({
             .cbuf_index = storage_buffer.index,
             .cbuf_offset = storage_buffer.offset,
             .count = 1,
             .is_written = info.writes.contains(storage_buffer),
             .has_size = IsNVNStorageBufferDescriptor(program.stage, storage_buffer.index, storage_buffer.offset),
-            .access_range = program.stage == Stage::Compute ? CollectAccessRange(storage_buffer, info)
-                                                          : ComputeStorageBufferAccessRange{},
+            .access_range = access_range,
         });
     }
     for (const StorageInst& storage_inst : info.to_replace) {

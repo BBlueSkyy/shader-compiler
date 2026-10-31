@@ -6,6 +6,8 @@
 #include <array>
 #include <bitset>
 #include <map>
+#include <string>
+#include <vector>
 
 #include <shader_compiler/common/common_types.h>
 #include <shader_compiler/frontend/ir/type.h>
@@ -157,7 +159,15 @@ struct ImageDescriptor {
 };
 using ImageDescriptors = boost::container::small_vector<ImageDescriptor, 4>;
 
+// Temporary observation only; never consumed for binding or code generation.
+struct ComputeSsboDiagnostic {
+    u32 cbuf_index;
+    u32 cbuf_offset;
+    std::string detail;
+};
+
 struct Info {
+    std::vector<ComputeSsboDiagnostic> compute_ssbo_diagnostics;
     static constexpr size_t MAX_INDIRECT_CBUFS{14};
     static constexpr size_t MAX_CBUFS{18};
     static constexpr size_t MAX_SSBOS{32};
