@@ -3,6 +3,7 @@
 
 #include <range/v3/algorithm.hpp>
 #include <optional>
+#include "structured_ssbo_bounds.h"
 
 #include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
@@ -389,63 +390,138 @@ std::optional<StorageBufferAddr> Track(const IR::Value& value, const IR::Value& 
 // Unrecognized expressions stay unknown; no guessed stride or game-specific layout.
 struct AffineOffsetRange : ComputeStorageBufferAccessRange {
     u64 pointer_coefficient{};
+    bool exact_constant{}; // Scalar bounds cannot scale the symbolic pointer base.
 };
 
-std::optional<AffineOffsetRange> TrackOffsetRange(const IR::Value& value,
-                                                StorageBufferAddr pointer, u32& budget, u32 depth = 0) {
+std::optional<AffineOffsetRange>
+TrackOffsetRange(const IR::Value &value, StorageBufferAddr pointer, u32 &budget, u32 depth = 0,
+                 const StructuredSsboBounds *flow = nullptr,
+                 const StructuredSsboBounds::Facts *facts = nullptr) {
     constexpr u64 limit{1ULL << 32};
-    if (depth > 64 || !budget) return std::nullopt;
+    if (depth > 64 || !budget)
+        return std::nullopt;
     --budget; // Shared SSA subtrees must not cause exponential traversal.
     AffineOffsetRange result;
     result.known = true;
     if (value.IsImmediate()) {
-        if (value.Type() != IR::Type::U32) return std::nullopt;
+        if (value.Type() != IR::Type::U32)
+            return std::nullopt;
         result.constant = value.U32();
+        result.exact_constant = true;
         return result;
     }
-    const IR::Inst* inst{value.InstRecursive()};
+    const IR::Inst *inst{value.InstRecursive()};
     switch (inst->GetOpcode()) {
+    case IR::Opcode::BitFieldUExtract: {
+        if (!flow || !inst->Arg(1).IsImmediate() || !inst->Arg(2).IsImmediate())
+            return std::nullopt;
+        const u32 shift{inst->Arg(1).U32()}, bits{inst->Arg(2).U32()};
+        if (shift >= 32 || !bits || bits > 32 - shift)
+            return std::nullopt;
+        const auto input = TrackOffsetRange(inst->Arg(0), pointer, budget, depth + 1, flow, facts);
+        if (!input || input->pointer_coefficient || input->constant >= limit)
+            return std::nullopt;
+        for (size_t axis{}; axis < 3; ++axis)
+            if (input->workgroup[axis] || input->local[axis])
+                return std::nullopt;
+        result.constant = (std::min)(input->constant >> shift, (u64{1} << bits) - 1);
+        return result;
+    }
+    case IR::Opcode::Phi: {
+        if (!flow || !flow->Valid() || !facts || inst->Type() != IR::Type::U32)
+            return std::nullopt;
+        if (const auto bound = flow->InductionBound(inst)) {
+            result.constant = *bound;
+            return result;
+        }
+        if (flow->HasBackedge(inst))
+            return std::nullopt;
+        std::optional<AffineOffsetRange> combined;
+        for (size_t i{}; i < inst->NumArgs(); ++i) {
+            const auto incoming = flow->Incoming(inst, inst->PhiBlock(i), *facts);
+            if (!incoming)
+                continue;
+            const auto range =
+                TrackOffsetRange(inst->Arg(i), pointer, budget, depth + 1, flow, &*incoming);
+            if (!range)
+                return std::nullopt;
+            if (!combined) {
+                combined = range;
+                continue;
+            }
+            if (combined->pointer_coefficient != range->pointer_coefficient)
+                return std::nullopt;
+            combined->exact_constant &=
+                range->exact_constant && combined->constant == range->constant;
+            combined->constant = (std::max)(combined->constant, range->constant);
+            for (size_t axis{}; axis < 3; ++axis) {
+                combined->workgroup[axis] =
+                    (std::max)(combined->workgroup[axis], range->workgroup[axis]);
+                combined->local[axis] = (std::max)(combined->local[axis], range->local[axis]);
+            }
+        }
+        return combined;
+    }
     case IR::Opcode::GetCbufU32:
-        if (!inst->Arg(0).IsImmediate() || !inst->Arg(1).IsImmediate()) return std::nullopt;
+        if (!inst->Arg(0).IsImmediate() || !inst->Arg(1).IsImmediate())
+            return std::nullopt;
         if (inst->Arg(0).U32() == pointer.index && inst->Arg(1).U32() == pointer.offset)
             result.pointer_coefficient = 1;
-        else result.constant = limit - 1; // Other cbuf values are U32 parameters, not pointer bases.
+        else
+            result.constant = limit - 1; // Other cbuf values are U32 parameters, not pointer bases.
         return result;
     case IR::Opcode::CompositeExtractU32x3: {
-        if (!inst->Arg(1).IsImmediate() || inst->Arg(0).IsImmediate()) return std::nullopt;
+        if (!inst->Arg(1).IsImmediate() || inst->Arg(0).IsImmediate())
+            return std::nullopt;
         const auto axis{inst->Arg(1).U32()};
-        if (axis >= 3) return std::nullopt;
+        if (axis >= 3)
+            return std::nullopt;
         const auto vector_op{inst->Arg(0).InstRecursive()->GetOpcode()};
-        if (vector_op == IR::Opcode::WorkgroupId) result.workgroup[axis] = 1;
-        else if (vector_op == IR::Opcode::LocalInvocationId) result.local[axis] = 1;
-        else return std::nullopt;
+        if (vector_op == IR::Opcode::WorkgroupId)
+            result.workgroup[axis] = 1;
+        else if (vector_op == IR::Opcode::LocalInvocationId)
+            result.local[axis] = 1;
+        else
+            return std::nullopt;
         return result;
     }
     case IR::Opcode::IAdd32:
     case IR::Opcode::IMul32:
     case IR::Opcode::ShiftLeftLogical32: {
-        auto lhs{TrackOffsetRange(inst->Arg(0), pointer, budget, depth + 1)};
-        if (!lhs) return std::nullopt;
+        auto lhs{TrackOffsetRange(inst->Arg(0), pointer, budget, depth + 1, flow, facts)};
+        if (!lhs)
+            return std::nullopt;
         std::optional<AffineOffsetRange> rhs;
         if (inst->GetOpcode() == IR::Opcode::ShiftLeftLogical32) {
-            if (!inst->Arg(1).IsImmediate() || inst->Arg(1).U32() >= 32) return std::nullopt;
+            if (!inst->Arg(1).IsImmediate() || inst->Arg(1).U32() >= 32)
+                return std::nullopt;
             rhs = AffineOffsetRange{};
             rhs->known = true;
             rhs->constant = 1ULL << inst->Arg(1).U32();
+            rhs->exact_constant = true;
         } else {
-            rhs = TrackOffsetRange(inst->Arg(1), pointer, budget, depth + 1);
+            rhs = TrackOffsetRange(inst->Arg(1), pointer, budget, depth + 1, flow, facts);
         }
-        if (!rhs) return std::nullopt;
-        auto has_axes = [](const ComputeStorageBufferAccessRange& range) {
+        if (!rhs)
+            return std::nullopt;
+        auto has_axes = [](const ComputeStorageBufferAccessRange &range) {
             for (size_t axis{}; axis < 3; ++axis)
-                if (range.workgroup[axis] || range.local[axis]) return true;
+                if (range.workgroup[axis] || range.local[axis])
+                    return true;
             return false;
         };
         if (inst->GetOpcode() != IR::Opcode::IAdd32) {
-            if (has_axes(*rhs) || rhs->pointer_coefficient) std::swap(lhs, rhs);
-            if (has_axes(*rhs) || rhs->pointer_coefficient) return std::nullopt; // Not an affine product.
+            if (has_axes(*rhs) || rhs->pointer_coefficient)
+                std::swap(lhs, rhs);
+            if (has_axes(*rhs) || rhs->pointer_coefficient)
+                return std::nullopt; // Not an affine product.
+            if (lhs->pointer_coefficient && !rhs->exact_constant)
+                return std::nullopt;
+            lhs->exact_constant &= rhs->exact_constant;
             const u64 factor{rhs->constant};
-            auto mul = [factor](u64 x) { return factor && x > limit / factor ? limit : x * factor; };
+            auto mul = [factor](u64 x) {
+                return factor && x > limit / factor ? limit : x * factor;
+            };
             lhs->constant = mul(lhs->constant);
             lhs->pointer_coefficient = mul(lhs->pointer_coefficient);
             for (size_t axis{}; axis < 3; ++axis) {
@@ -453,16 +529,21 @@ std::optional<AffineOffsetRange> TrackOffsetRange(const IR::Value& value,
                 lhs->local[axis] = mul(lhs->local[axis]);
             }
         } else {
+            lhs->exact_constant &= rhs->exact_constant;
             lhs->constant = (std::min)(limit, lhs->constant + rhs->constant);
-            lhs->pointer_coefficient = (std::min)(limit, lhs->pointer_coefficient + rhs->pointer_coefficient);
+            lhs->pointer_coefficient =
+                (std::min)(limit, lhs->pointer_coefficient + rhs->pointer_coefficient);
             for (size_t axis{}; axis < 3; ++axis) {
-                lhs->workgroup[axis] = (std::min)(limit, lhs->workgroup[axis] + rhs->workgroup[axis]);
+                lhs->workgroup[axis] =
+                    (std::min)(limit, lhs->workgroup[axis] + rhs->workgroup[axis]);
                 lhs->local[axis] = (std::min)(limit, lhs->local[axis] + rhs->local[axis]);
             }
         }
+        lhs->exact_constant &= lhs->constant < limit;
         return lhs;
     }
-    default: return std::nullopt;
+    default:
+        return std::nullopt;
     }
 }
 
@@ -479,15 +560,17 @@ u32 GlobalAccessWidth(IR::Opcode opcode) {
     }
 }
 
-ComputeStorageBufferAccessRange CollectAccessRange(StorageBufferAddr pointer, const StorageInfo& info) {
+ComputeStorageBufferAccessRange CollectAccessRange(StorageBufferAddr pointer, const StorageInfo& info,
+                                                  const StructuredSsboBounds* flow = nullptr) {
     ComputeStorageBufferAccessRange result{.known = true};
     for (const auto& access : info.to_replace) {
         if (access.storage_buffer != pointer) continue;
         const auto low{TrackLowAddress(access.inst)};
         const auto width{GlobalAccessWidth(access.inst->GetOpcode())};
         if (!low || low->imm_offset < 0 || !width) return {};
-        u32 budget{512};
-        auto range{TrackOffsetRange(low->value, pointer, budget)};
+        u32 budget{flow ? 4096U : 512U};
+        const auto facts = flow ? flow->At(access.block) : StructuredSsboBounds::Facts{};
+        auto range{TrackOffsetRange(low->value, pointer, budget, 0, flow, &facts)};
         if (!range || range->pointer_coefficient != 1) return {};
         range->constant += static_cast<u32>(low->imm_offset) + width;
         result.constant = (std::max)(result.constant, range->constant);
@@ -661,23 +744,29 @@ void GlobalMemoryToStorageBufferPass(IR::Program& program, const HostTranslateIn
             CollectStorageBuffers(*block, inst, info);
         }
     }
+    std::optional<StructuredSsboBounds> flow;
     for (const StorageBufferAddr& storage_buffer : info.set) {
+        const bool hasSize{IsNVNStorageBufferDescriptor(program.stage, storage_buffer.index, storage_buffer.offset)};
+        auto range{program.stage == Stage::Compute ? CollectAccessRange(storage_buffer, info) : ComputeStorageBufferAccessRange{}};
+        if (program.stage == Stage::Compute && !hasSize && !range.known) {
+            if (!flow) flow.emplace(program);
+            if (flow->Valid()) range = CollectAccessRange(storage_buffer, info, &*flow);
+        }
         program.info.storage_buffers_descriptors.push_back({
             .cbuf_index = storage_buffer.index,
             .cbuf_offset = storage_buffer.offset,
             .count = 1,
             .is_written = info.writes.contains(storage_buffer),
-            .has_size = IsNVNStorageBufferDescriptor(program.stage, storage_buffer.index, storage_buffer.offset),
-            .access_range = program.stage == Stage::Compute ? CollectAccessRange(storage_buffer, info)
-                                                          : ComputeStorageBufferAccessRange{},
+            .has_size = hasSize,
+            .access_range = range,
         });
     }
-    for (const StorageInst& storage_inst : info.to_replace) {
+    for (const StorageInst &storage_inst : info.to_replace) {
         const StorageBufferAddr storage_buffer{storage_inst.storage_buffer};
         const auto it{info.set.find(storage_inst.storage_buffer)};
         const IR::U32 index{IR::Value{static_cast<u32>(info.set.index_of(it))}};
-        IR::Block* const block{storage_inst.block};
-        IR::Inst* const inst{storage_inst.inst};
+        IR::Block *const block{storage_inst.block};
+        IR::Inst *const inst{storage_inst.inst};
         const IR::U32 offset{
             StorageOffset(*block, *inst, storage_buffer, host_info.min_ssbo_alignment)};
         Replace(*block, *inst, index, offset);
@@ -685,7 +774,7 @@ void GlobalMemoryToStorageBufferPass(IR::Program& program, const HostTranslateIn
 }
 
 template <typename Descriptors, typename Descriptor, typename Func>
-static u32 Add(Descriptors& descriptors, const Descriptor& desc, Func&& pred) {
+static u32 Add(Descriptors &descriptors, const Descriptor &desc, Func &&pred) {
     // TODO: Handle arrays
     const auto it{ranges::find_if(descriptors, pred)};
     if (it != descriptors.end()) {
