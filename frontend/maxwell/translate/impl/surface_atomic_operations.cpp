@@ -189,11 +189,10 @@ void TranslatorVisitor::SUATOM(u64 insn) {
 }
 
 void TranslatorVisitor::SURED(u64 insn) {
-    // TODO: confirm offsets
     union {
         u64 raw;
         BitField<51, 1, u64> is_bound;
-        BitField<21, 3, AtomicOp> op;
+        BitField<24, 3, AtomicOp> op;
         BitField<33, 3, Type> type;
         BitField<20, 3, Size> size;
         BitField<49, 2, Clamp> clamp;

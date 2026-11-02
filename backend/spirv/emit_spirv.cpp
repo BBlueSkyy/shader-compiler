@@ -395,6 +395,12 @@ void SetupTransformFeedbackCapabilities(EmitContext& ctx, Id main_func) {
 }
 
 void SetupCapabilities(const Profile& profile, const Info& info, EmitContext& ctx) {
+    for (const auto& image : info.image_descriptors) {
+        if (image.type == TextureType::Color1D || image.type == TextureType::ColorArray1D) {
+            ctx.AddCapability(spv::Capability::Image1D);
+            break;
+        }
+    }
     if (info.uses_sampled_1d) {
         ctx.AddCapability(spv::Capability::Sampled1D);
     }
