@@ -47,6 +47,12 @@ enum class TexturePixelFormat : u32 {
     OTHER
 };
 
+enum class TextureBufferSampleType : u32 {
+    Float,
+    Uint,
+    Sint,
+};
+
 enum class ImageFormat : u32 {
     Typeless,
     R8_UINT,
@@ -106,6 +112,7 @@ struct TextureBufferDescriptor {
     u32 secondary_shift_left;
     u32 count;
     u32 size_shift;
+    TextureBufferSampleType sample_type{TextureBufferSampleType::Float};
 
     auto operator<=>(const TextureBufferDescriptor&) const = default;
 };
