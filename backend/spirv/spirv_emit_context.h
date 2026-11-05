@@ -39,6 +39,8 @@ struct TextureDefinition {
 
 struct TextureBufferDefinition {
     Id id;
+    Id image_type;
+    TextureBufferSampleType sample_type;
     u32 count;
 };
 
@@ -206,7 +208,6 @@ public:
     Id output_f32{};
     Id output_u32{};
 
-    Id image_buffer_type{};
     Id sampled_texture_buffer_type{};
     Id image_u32{};
 
