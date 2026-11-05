@@ -184,7 +184,7 @@ Id TextureImage(EmitContext& ctx, IR::TextureInstInfo info, const IR::Value& ind
         if (def.count > 1) {
             throw NotImplementedException("Indirect texture sample");
         }
-       return ctx.OpLoad(ctx.image_buffer_type, def.id); 
+        return ctx.OpLoad(def.image_type, def.id);
     } else {
         const TextureDefinition& def{ctx.textures.at(info.descriptor_index)};
         if (def.count > 1) {
@@ -542,6 +542,17 @@ Id EmitImageFetch(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id c
         }
     }
     const ImageOperands operands(Id{}, lod, ms);
+    if (info.type == TextureType::Buffer) {
+        const auto sample_type{ctx.texture_buffers.at(info.descriptor_index).sample_type};
+        const Id result_type{sample_type == TextureBufferSampleType::Uint
+                                 ? ctx.U32[4]
+                                 : sample_type == TextureBufferSampleType::Sint ? ctx.S32[4] : ctx.F32[4]};
+        const Id fetched{Emit(&EmitContext::OpImageSparseFetch, &EmitContext::OpImageFetch,
+                              ctx, inst, result_type, TextureImage(ctx, info, index), coords,
+                              operands.MaskOptional(), operands.Span())};
+        // Maxwell's TLD registers carry the raw component bits, even for integer textures.
+        return sample_type == TextureBufferSampleType::Float ? fetched : ctx.OpBitcast(ctx.F32[4], fetched);
+    }
     return Emit(&EmitContext::OpImageSparseFetch, &EmitContext::OpImageFetch, ctx, inst, ctx.F32[4],
                 TextureImage(ctx, info, index), coords, operands.MaskOptional(), operands.Span());
 }
