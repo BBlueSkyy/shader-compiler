@@ -54,6 +54,9 @@ class CaptureEnvironment final : public Shader::Environment {
     bool IsTexturePixelFormatInteger(u32) override {
         throw std::runtime_error("missing integer texture");
     }
+    Shader::TextureBufferSampleType ReadTextureBufferSampleType(u32) override {
+        throw std::runtime_error("missing texture buffer sample type");
+    }
     u32 ReadViewportTransformState() override { return 0; }
     u32 TextureBoundBuffer() const override { return 2; }
     u32 LocalMemorySize() const override { return 0; }
