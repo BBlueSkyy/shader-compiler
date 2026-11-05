@@ -461,6 +461,15 @@ TexturePixelFormat ReadTexturePixelFormat(Environment& env, const ConstBufferAdd
     return env.ReadTexturePixelFormat(lhs_raw | rhs_raw);
 }
 
+TextureBufferSampleType ReadTextureBufferSampleType(Environment& env, const ConstBufferAddr& cbuf) {
+    const u32 lhs_raw{env.ReadCbufValue(cbuf.index, cbuf.offset) << cbuf.shift_left};
+    const u32 rhs_raw{cbuf.has_secondary
+                          ? env.ReadCbufValue(cbuf.secondary_index, cbuf.secondary_offset)
+                                << cbuf.secondary_shift_left
+                          : 0U};
+    return env.ReadTextureBufferSampleType(lhs_raw | rhs_raw);
+}
+
 bool IsTexturePixelFormatInteger(Environment& env, const ConstBufferAddr& cbuf) {
     const u32 secondary_index{cbuf.has_secondary ? cbuf.secondary_index : cbuf.index};
     const u32 secondary_offset{cbuf.has_secondary ? cbuf.secondary_offset : cbuf.offset};
@@ -487,7 +496,8 @@ public:
                    desc.secondary_cbuf_index == existing.secondary_cbuf_index &&
                    desc.secondary_cbuf_offset == existing.secondary_cbuf_offset &&
                    desc.count == existing.count && desc.size_shift == existing.size_shift &&
-                   desc.has_secondary == existing.has_secondary;
+                   desc.has_secondary == existing.has_secondary &&
+                   desc.sample_type == existing.sample_type;
         });
     }
 
@@ -730,6 +740,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .secondary_shift_left = cbuf.secondary_shift_left,
                     .count = cbuf.count,
                     .size_shift = DESCRIPTOR_SIZE_SHIFT,
+                    .sample_type = ReadTextureBufferSampleType(env, cbuf),
                 });
             } else {
                 index = descriptors.Add(TextureDescriptor{
