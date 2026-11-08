@@ -91,14 +91,12 @@ Id EmulateShuffle(EmitContext& ctx, Id value, Id src_thread_id) {
 
 Id SelectValue(EmitContext& ctx, Id in_range, Id value, Id src_thread_id) {
     const Id shuffle_result{[&] () {
-        // SPIR-V 1.4 and earlier require the Id operand of
-        // OpGroupNonUniformBroadcast to be a constant instruction. A dynamic
-        // lane therefore cannot be lowered to Broadcast directly. Use the
-        // existing constant-lane broadcast emulation whenever native shuffle
-        // is disabled or known broken.
-        if (ctx.profile.disable_subgroup_shuffle || ctx.profile.has_broken_spirv_subgroup_shuffle)
+        if (ctx.profile.disable_subgroup_shuffle)
+            return ctx.OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value,  src_thread_id);
+        else if (ctx.profile.has_broken_spirv_subgroup_shuffle)
             return EmulateShuffle(ctx, value, src_thread_id);
-        return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value, src_thread_id);
+        else
+            return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value,  src_thread_id);
     }()};
     return ctx.OpSelect(ctx.U32[1], in_range, shuffle_result, value);
 }

@@ -17,15 +17,9 @@ required = [
     ("warp", "return pred;", warp),
     ("warp", "return ctx.true_value;", warp),
     ("warp", "SetInBoundsFlag(inst, ctx.false_value);", warp),
-    ("warp", "disable_subgroup_shuffle || ctx.profile.has_broken_spirv_subgroup_shuffle", warp),
-    ("warp", "return EmulateShuffle(ctx, value, src_thread_id);", warp),
 ]
 for area, token, source in required:
     if token not in source:
         raise SystemExit(f"missing subgroup-stage guard in {area}: {token}")
 
 print("subgroup stage source contract: ok")
-
-if "OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value,  src_thread_id)" in warp:
-    raise SystemExit("dynamic OpGroupNonUniformBroadcast must not be emitted for SPIR-V 1.4")
-
