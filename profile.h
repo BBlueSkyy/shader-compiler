@@ -7,6 +7,8 @@
 
 namespace Shader {
 
+enum class Stage : u32;
+
 struct Profile {
     u32 supported_spirv{0x00010000};
 
@@ -28,6 +30,7 @@ struct Profile {
     bool support_fp64_signed_zero_nan_preserve{};
     bool support_explicit_workgroup_layout{};
     bool support_vote{};
+    u32 supported_subgroup_stages{0x7F};
     bool support_viewport_index_layer_non_geometry{};
     bool support_viewport_mask{};
     bool support_typeless_image_loads{};
@@ -89,6 +92,10 @@ struct Profile {
 
 
     u32 gl_max_compute_smem_size{};
+
+    bool SupportsSubgroupStage(Stage stage) const {
+        return (supported_subgroup_stages & (1u << static_cast<u32>(stage))) != 0;
+    }
 };
 
 } // namespace Shader

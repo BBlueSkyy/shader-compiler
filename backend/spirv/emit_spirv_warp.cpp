@@ -10,7 +10,14 @@ Id SubgroupScope(EmitContext& ctx) {
     return ctx.Const(static_cast<u32>(spv::Scope::Subgroup));
 }
 
+bool StageSupportsSubgroups(EmitContext& ctx) {
+    return ctx.profile.SupportsSubgroupStage(ctx.stage);
+}
+
 Id GetThreadId(EmitContext& ctx) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return ctx.u32_zero_value;
+    }
     return ctx.OpLoad(ctx.U32[1], ctx.subgroup_local_invocation_id);
 }
 
@@ -110,6 +117,9 @@ Id EmitLaneId(EmitContext& ctx) {
 }
 
 Id EmitVoteAll(EmitContext& ctx, Id pred) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return pred;
+    }
     if (!ctx.profile.warp_size_potentially_larger_than_guest) {
         return ctx.OpGroupNonUniformAll(ctx.U1, SubgroupScope(ctx), pred);
     }
@@ -123,6 +133,9 @@ Id EmitVoteAll(EmitContext& ctx, Id pred) {
 }
 
 Id EmitVoteAny(EmitContext& ctx, Id pred) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return pred;
+    }
     if (!ctx.profile.warp_size_potentially_larger_than_guest) {
         return ctx.OpGroupNonUniformAny(ctx.U1, SubgroupScope(ctx), pred);
     }
@@ -136,6 +149,9 @@ Id EmitVoteAny(EmitContext& ctx, Id pred) {
 }
 
 Id EmitVoteEqual(EmitContext& ctx, Id pred) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return ctx.true_value;
+    }
     if (!ctx.profile.warp_size_potentially_larger_than_guest) {
         return ctx.OpGroupNonUniformAllEqual(ctx.U1, SubgroupScope(ctx), pred);
     }
@@ -150,6 +166,9 @@ Id EmitVoteEqual(EmitContext& ctx, Id pred) {
 }
 
 Id EmitSubgroupBallot(EmitContext& ctx, Id pred) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return ctx.OpSelect(ctx.U32[1], pred, ctx.Const(1u), ctx.u32_zero_value);
+    }
     const Id ballot{ctx.OpGroupNonUniformBallot(ctx.U32[4], SubgroupScope(ctx), pred)};
     if (!ctx.profile.warp_size_potentially_larger_than_guest) {
         return ctx.OpCompositeExtract(ctx.U32[1], ballot, 0U);
@@ -158,27 +177,46 @@ Id EmitSubgroupBallot(EmitContext& ctx, Id pred) {
 }
 
 Id EmitSubgroupEqMask(EmitContext& ctx) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return ctx.Const(1u);
+    }
     return LoadMask(ctx, ctx.subgroup_mask_eq);
 }
 
 Id EmitSubgroupLtMask(EmitContext& ctx) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return ctx.u32_zero_value;
+    }
     return LoadMask(ctx, ctx.subgroup_mask_lt);
 }
 
 Id EmitSubgroupLeMask(EmitContext& ctx) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return ctx.Const(1u);
+    }
     return LoadMask(ctx, ctx.subgroup_mask_le);
 }
 
 Id EmitSubgroupGtMask(EmitContext& ctx) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return ctx.u32_zero_value;
+    }
     return LoadMask(ctx, ctx.subgroup_mask_gt);
 }
 
 Id EmitSubgroupGeMask(EmitContext& ctx) {
+    if (!StageSupportsSubgroups(ctx)) {
+        return ctx.Const(1u);
+    }
     return LoadMask(ctx, ctx.subgroup_mask_ge);
 }
 
 Id EmitShuffleIndex(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
                     Id segmentation_mask) {
+    if (!StageSupportsSubgroups(ctx)) {
+        SetInBoundsFlag(inst, ctx.false_value);
+        return value;
+    }
     const Id not_seg_mask{ctx.OpNot(ctx.U32[1], segmentation_mask)};
     const Id thread_id{EmitLaneId(ctx)};
     const Id min_thread_id{ComputeMinThreadId(ctx, thread_id, segmentation_mask)};
@@ -198,6 +236,10 @@ Id EmitShuffleIndex(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id cla
 
 Id EmitShuffleUp(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
                  Id segmentation_mask) {
+    if (!StageSupportsSubgroups(ctx)) {
+        SetInBoundsFlag(inst, ctx.false_value);
+        return value;
+    }
     const Id thread_id{EmitLaneId(ctx)};
     const Id max_thread_id{GetMaxThreadId(ctx, thread_id, clamp, segmentation_mask)};
     Id src_thread_id{ctx.OpISub(ctx.U32[1], thread_id, index)};
@@ -213,6 +255,10 @@ Id EmitShuffleUp(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
 
 Id EmitShuffleDown(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
                    Id segmentation_mask) {
+    if (!StageSupportsSubgroups(ctx)) {
+        SetInBoundsFlag(inst, ctx.false_value);
+        return value;
+    }
     const Id thread_id{EmitLaneId(ctx)};
     const Id max_thread_id{GetMaxThreadId(ctx, thread_id, clamp, segmentation_mask)};
     Id src_thread_id{ctx.OpIAdd(ctx.U32[1], thread_id, index)};
@@ -228,6 +274,10 @@ Id EmitShuffleDown(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clam
 
 Id EmitShuffleButterfly(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
                         Id segmentation_mask) {
+    if (!StageSupportsSubgroups(ctx)) {
+        SetInBoundsFlag(inst, ctx.false_value);
+        return value;
+    }
     const Id thread_id{EmitLaneId(ctx)};
     const Id max_thread_id{GetMaxThreadId(ctx, thread_id, clamp, segmentation_mask)};
     Id src_thread_id{ctx.OpBitwiseXor(ctx.U32[1], thread_id, index)};

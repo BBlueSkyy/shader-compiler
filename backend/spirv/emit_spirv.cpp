@@ -427,7 +427,7 @@ void SetupCapabilities(const Profile& profile, const Info& info, EmitContext& ct
     }
     if ((info.uses_subgroup_vote || info.uses_subgroup_invocation_id ||
          info.uses_subgroup_shuffles) &&
-        profile.support_vote) {
+        profile.support_vote && profile.SupportsSubgroupStage(ctx.stage)) {
         ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
 
         if (!profile.has_broken_spirv_subgroup_shuffle) {
