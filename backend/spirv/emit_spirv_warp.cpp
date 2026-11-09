@@ -293,7 +293,7 @@ Id EmitShuffleButterfly(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id
 
 Id EmitFSwizzleAdd(EmitContext& ctx, Id op_a, Id op_b, Id swizzle) {
     const Id three{ctx.Const(3U)};
-    Id mask{ctx.OpLoad(ctx.U32[1], ctx.subgroup_local_invocation_id)};
+    Id mask{GetThreadId(ctx)};
     mask = ctx.OpBitwiseAnd(ctx.U32[1], mask, three);
     mask = ctx.OpShiftLeftLogical(ctx.U32[1], mask, ctx.Const(1U));
     mask = ctx.OpShiftRightLogical(ctx.U32[1], swizzle, mask);
