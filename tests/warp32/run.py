@@ -29,6 +29,7 @@ sources += list((root / 'frontend/ir').glob('*.cpp'))
 sources += list((deps / 'sirit/src').rglob('*.cpp'))
 flags = ['-std=c++20', '-O1', '-g', '-include', 'cstddef', '-DFMT_HEADER_ONLY',
          '-fno-strict-aliasing', '-ffunction-sections', '-fdata-sections',
+         '-Wno-changes-meaning',
          '-fsanitize=undefined', '-fno-sanitize-recover=all', *shlex.split(os.environ.get('CXXFLAGS', '')), '-UNDEBUG']
 def compile_source(source):
     obj = build / (('sirit_' if source.is_relative_to(deps / 'sirit') else '') + source.stem + '.o')
