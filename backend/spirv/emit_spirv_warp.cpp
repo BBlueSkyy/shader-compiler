@@ -59,6 +59,65 @@ void SetInBoundsFlag(IR::Inst* inst, Id result) {
     in_bounds->Invalidate();
 }
 
+bool HasExactScalarShuffle(IR::Inst* inst) {
+    // Without a lane ID we may promote validity only if BOTH results are exact
+    // for every possible guest lane. Uniform-looking registers are not proof.
+    const IR::Value index{inst->Arg(1).Resolve()};
+    const IR::Value clamp{inst->Arg(2).Resolve()};
+    const IR::Value segmentation_mask{inst->Arg(3).Resolve()};
+    if (!index.IsImmediate() || !clamp.IsImmediate() || !segmentation_mask.IsImmediate()) {
+        return false;
+    }
+    const u32 b{index.U32()};
+    const u32 c{clamp.U32()};
+    const u32 mask{segmentation_mask.U32()};
+    if (b > 31 || c > 31 || mask > 31) {
+        return false;
+    }
+    const bool literal_data{inst->Arg(0).IsImmediate()};
+    for (u32 lane = 0; lane < 32; ++lane) {
+        const u32 min_lane{lane & mask};
+        const u32 max_lane{min_lane | (c & ~mask)};
+        u32 source{};
+        bool in_range{};
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::ShuffleIndex:
+            source = min_lane | (b & ~mask);
+            in_range = source <= max_lane;
+            break;
+        case IR::Opcode::ShuffleUp:
+            // Avoid unsigned underflow; a negative source is always invalid.
+            source = lane >= b ? lane - b : 0;
+            in_range = lane >= b && source >= max_lane;
+            break;
+        case IR::Opcode::ShuffleDown:
+            source = lane + b;
+            in_range = source <= max_lane;
+            break;
+        case IR::Opcode::ShuffleButterfly:
+            source = lane ^ b;
+            in_range = source <= max_lane;
+            break;
+        default:
+            return false;
+        }
+        if (!in_range || (!literal_data && source != lane)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Id EmitScalarShuffle(EmitContext& ctx, IR::Inst* inst, Id value) {
+    if (HasExactScalarShuffle(inst)) {
+        SetInBoundsFlag(inst, ctx.true_value);
+    } else {
+        // Preserve #430 for every unproved case, including dynamic controls.
+        SetInBoundsFlag(inst, ctx.false_value);
+    }
+    return value;
+}
+
 Id ComputeMinThreadId(EmitContext& ctx, Id thread_id, Id segmentation_mask) {
     return ctx.OpBitwiseAnd(ctx.U32[1], thread_id, segmentation_mask);
 }
@@ -214,8 +273,7 @@ Id EmitSubgroupGeMask(EmitContext& ctx) {
 Id EmitShuffleIndex(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
                     Id segmentation_mask) {
     if (!StageSupportsSubgroups(ctx)) {
-        SetInBoundsFlag(inst, ctx.false_value);
-        return value;
+        return EmitScalarShuffle(ctx, inst, value);
     }
     const Id not_seg_mask{ctx.OpNot(ctx.U32[1], segmentation_mask)};
     const Id thread_id{EmitLaneId(ctx)};
@@ -237,8 +295,7 @@ Id EmitShuffleIndex(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id cla
 Id EmitShuffleUp(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
                  Id segmentation_mask) {
     if (!StageSupportsSubgroups(ctx)) {
-        SetInBoundsFlag(inst, ctx.false_value);
-        return value;
+        return EmitScalarShuffle(ctx, inst, value);
     }
     const Id thread_id{EmitLaneId(ctx)};
     const Id max_thread_id{GetMaxThreadId(ctx, thread_id, clamp, segmentation_mask)};
@@ -256,8 +313,7 @@ Id EmitShuffleUp(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
 Id EmitShuffleDown(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
                    Id segmentation_mask) {
     if (!StageSupportsSubgroups(ctx)) {
-        SetInBoundsFlag(inst, ctx.false_value);
-        return value;
+        return EmitScalarShuffle(ctx, inst, value);
     }
     const Id thread_id{EmitLaneId(ctx)};
     const Id max_thread_id{GetMaxThreadId(ctx, thread_id, clamp, segmentation_mask)};
@@ -275,8 +331,7 @@ Id EmitShuffleDown(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clam
 Id EmitShuffleButterfly(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id clamp,
                         Id segmentation_mask) {
     if (!StageSupportsSubgroups(ctx)) {
-        SetInBoundsFlag(inst, ctx.false_value);
-        return value;
+        return EmitScalarShuffle(ctx, inst, value);
     }
     const Id thread_id{EmitLaneId(ctx)};
     const Id max_thread_id{GetMaxThreadId(ctx, thread_id, clamp, segmentation_mask)};
