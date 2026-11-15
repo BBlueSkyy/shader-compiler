@@ -13,6 +13,12 @@
 
 namespace Shader {
 
+struct TextureHandleSource {
+    u32 cbuf_index, cbuf_offset, shift_left;
+    u32 secondary_cbuf_index, secondary_cbuf_offset, secondary_shift_left;
+};
+enum class TextureQueryKind { Type, PixelFormat, Integer, Compare };
+
 class Environment {
 public:
     virtual ~Environment() = default;
@@ -28,6 +34,21 @@ public:
     [[nodiscard]] virtual TexturePixelFormat ReadTexturePixelFormat(u32 raw_handle) = 0;
 
     [[nodiscard]] virtual bool IsTexturePixelFormatInteger(u32 raw_handle) = 0;
+
+    // Metadata queries keep handle origins separate from CBUF values folded
+    // into code. The default preserves the exact legacy reads and result.
+    [[nodiscard]] virtual u32 QueryTexture(const TextureHandleSource& source, TextureQueryKind kind) {
+        const u32 lhs{ReadCbufValue(source.cbuf_index, source.cbuf_offset) << source.shift_left};
+        const u32 rhs{ReadCbufValue(source.secondary_cbuf_index, source.secondary_cbuf_offset) << source.secondary_shift_left};
+        const u32 handle{lhs | rhs};
+        switch (kind) {
+        case TextureQueryKind::Type: return static_cast<u32>(ReadTextureType(handle));
+        case TextureQueryKind::PixelFormat: return static_cast<u32>(ReadTexturePixelFormat(handle));
+        case TextureQueryKind::Integer: return IsTexturePixelFormatInteger(handle);
+        case TextureQueryKind::Compare: return static_cast<u32>(ReadTextureCompareFunc(handle));
+        }
+        return 0;
+    }
 
     [[nodiscard]] virtual u32 ReadViewportTransformState() = 0;
 
