@@ -5,6 +5,8 @@
 #include <array>
 #include <bit>
 #include <climits>
+#include <limits>
+#include <initializer_list>
 
 #include <boost/container/static_vector.hpp>
 
@@ -864,6 +866,72 @@ void EmitContext::DefineAttributeMemAccess(const Info& info) {
     }
 }
 
+// The pinned Sirit has no OpArrayLength API. Lower the bounds guard directly
+// into the assembled helpers, using fresh IDs from the module bound. This keeps
+// the dependency pinned and emits standard SPIR-V 1.0 instructions only.
+std::vector<u32> EmitContext::Assemble() const {
+    auto module = Sirit::Module::Assemble();
+    const auto helpers = std::count_if(ssbos.begin(), ssbos.end(), [](const auto& buffer) {
+        return Sirit::ValidId(buffer.write_cas);
+    });
+    if (!helpers) {
+        return module;
+    }
+    if (module.size() < 5 || module[3] > std::numeric_limits<u32>::max() - 4 * helpers) {
+        throw LogicError("Invalid SPIR-V ID bound for storage write guards");
+    }
+    std::vector<u32> guarded;
+    guarded.reserve(module.size() + 22 * helpers);
+    guarded.insert(guarded.end(), module.begin(), module.begin() + 5);
+    u32 next_id = module[3];
+    const StorageDefinitions* pending{};
+    size_t emitted{};
+    const auto emit = [&](spv::Op op, std::initializer_list<u32> operands) {
+        guarded.push_back((static_cast<u32>(operands.size() + 1) << 16) | static_cast<u32>(op));
+        guarded.insert(guarded.end(), operands.begin(), operands.end());
+    };
+    for (size_t pos = 5; pos < module.size();) {
+        const u32 count = module[pos] >> 16;
+        const auto op = static_cast<spv::Op>(module[pos] & 0xffff);
+        if (!count || count > module.size() - pos) {
+            throw LogicError("Invalid SPIR-V instruction in storage write guards");
+        }
+        if (op == spv::Op::OpFunction) {
+            if (count != 5 || pending) {
+                throw LogicError("Missing storage write helper entry block");
+            }
+            const auto found = std::find_if(ssbos.begin(), ssbos.end(), [&](const auto& buffer) {
+                return Sirit::ValidId(buffer.write_cas) && buffer.write_cas.value == module[pos + 2];
+            });
+            pending = found == ssbos.end() ? nullptr : &*found;
+        }
+        guarded.insert(guarded.end(), module.begin() + pos, module.begin() + pos + count);
+        if (pending && op == spv::Op::OpLabel) {
+            const u32 length = next_id++;
+            const u32 in_range = next_id++;
+            const u32 valid = next_id++;
+            const u32 invalid = next_id++;
+            // Runtime-array length counts complete U32 words. A truncated tail
+            // and a zero-length/null descriptor cannot enter the atomic loop.
+            emit(spv::Op::OpArrayLength, {U32[1].value, length, pending->U32.value, 0});
+            emit(spv::Op::OpULessThan, {U1.value, in_range, pending->write_cas_index.value, length});
+            emit(spv::Op::OpSelectionMerge, {valid, 0});
+            emit(spv::Op::OpBranchConditional, {in_range, valid, invalid});
+            emit(spv::Op::OpLabel, {invalid});
+            emit(spv::Op::OpReturn, {});
+            emit(spv::Op::OpLabel, {valid});
+            pending = nullptr;
+            ++emitted;
+        }
+        pos += count;
+    }
+    if (pending || emitted != static_cast<size_t>(helpers)) {
+        throw LogicError("Incomplete storage write bounds guards");
+    }
+    guarded[3] = next_id;
+    return guarded;
+}
+
 // Adapted from yuzu 2a0d707 and Eden #4739. Discover actual fallback writes,
 // using the exact native-path predicates used by the emitters (not uses_int*).
 void EmitContext::DefineWriteStorageCasLoopFunctions(const IR::Program& program) {
@@ -927,6 +995,7 @@ void EmitContext::DefineWriteStorageCasLoopFunctions(const IR::Program& program)
         OpReturn();
         OpFunctionEnd();
         ssbos[i].write_cas = func;
+        ssbos[i].write_cas_index = index;
     }
 }
 

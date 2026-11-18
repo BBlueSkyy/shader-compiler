@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <vulkan/vulkan.h>
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdio>
@@ -20,7 +21,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL Message(VkDebugUtilsMessageSeverityFlagBit
 static void Check(VkResult r) { if (r != VK_SUCCESS) { std::fprintf(stderr,"VkResult=%d\n",r); std::exit(2); } }
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
-    unsigned runs{};
+    unsigned runs{}, bounds_runs{};
     for (uint32_t api : {VK_API_VERSION_1_1, VK_API_VERSION_1_2}) {
         const char* layer="VK_LAYER_KHRONOS_validation";
         uint32_t n{}; Check(vkEnumerateInstanceLayerProperties(&n,nullptr));
@@ -48,32 +49,37 @@ int main(int argc, char** argv) {
         std::vector<VkPhysicalDevice> physicals(n); Check(vkEnumeratePhysicalDevices(instance,&n,physicals.data()));
         auto physical=physicals[0]; VkPhysicalDeviceProperties properties; vkGetPhysicalDeviceProperties(physical,&properties);
         std::printf("API 1.%u: %s\n",VK_VERSION_MINOR(api),properties.deviceName);
-        VkPhysicalDevice16BitStorageFeatures s16{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
+        VkPhysicalDeviceRobustness2FeaturesEXT robustness{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+        VkPhysicalDevice16BitStorageFeatures s16{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES}; s16.pNext=&robustness;
         VkPhysicalDevice8BitStorageFeatures s8{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES}; s8.pNext=&s16;
         VkPhysicalDeviceShaderFloat16Int8Features arithmetic{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES}; arithmetic.pNext=&s8;
         VkPhysicalDeviceUniformBufferStandardLayoutFeatures standard{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES}; standard.pNext=&arithmetic;
         VkPhysicalDeviceFeatures2 available{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2}; available.pNext=&standard; vkGetPhysicalDeviceFeatures2(physical,&available);
-        if (!arithmetic.shaderInt8 || !available.features.shaderInt16 || !s8.storageBuffer8BitAccess || !s8.uniformAndStorageBuffer8BitAccess || !s16.storageBuffer16BitAccess || !s16.uniformAndStorageBuffer16BitAccess || !standard.uniformBufferStandardLayout) {
+        if (!robustness.nullDescriptor || !arithmetic.shaderInt8 || !available.features.shaderInt16 || !s8.storageBuffer8BitAccess || !s8.uniformAndStorageBuffer8BitAccess || !s16.storageBuffer16BitAccess || !s16.uniformAndStorageBuffer16BitAccess || !standard.uniformBufferStandardLayout) {
             std::fprintf(stderr,"Test ICD must expose native features for A/B execution\n"); return 2;
         }
         vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,nullptr);
         std::vector<VkQueueFamilyProperties> families(n); vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,families.data());
         uint32_t family{}; while(family<n && !(families[family].queueFlags&VK_QUEUE_COMPUTE_BIT)) ++family; assert(family<n);
         for (unsigned mask : {64u,67u,107u,87u,127u,63u}) {
-            VkPhysicalDevice16BitStorageFeatures e16{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
+            VkPhysicalDeviceRobustness2FeaturesEXT er{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT}; er.nullDescriptor=VK_TRUE;
+            VkPhysicalDevice16BitStorageFeatures e16{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES}; e16.pNext=&er;
             e16.storageBuffer16BitAccess=(mask&8)!=0; e16.uniformAndStorageBuffer16BitAccess=(mask&32)!=0;
             VkPhysicalDevice8BitStorageFeatures e8{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES}; e8.pNext=&e16;
             e8.storageBuffer8BitAccess=(mask&4)!=0; e8.uniformAndStorageBuffer8BitAccess=(mask&16)!=0;
             VkPhysicalDeviceShaderFloat16Int8Features ei{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES}; ei.pNext=&e8; ei.shaderInt8=(mask&1)!=0;
             VkPhysicalDeviceUniformBufferStandardLayoutFeatures es{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES}; es.pNext=&ei; es.uniformBufferStandardLayout=VK_TRUE;
-            VkPhysicalDeviceFeatures enabled{}; enabled.shaderImageGatherExtended=available.features.shaderImageGatherExtended; enabled.shaderInt16=(mask&2)!=0; enabled.robustBufferAccess=available.features.robustBufferAccess;
+            VkPhysicalDeviceFeatures enabled{}; enabled.shaderImageGatherExtended=available.features.shaderImageGatherExtended; enabled.shaderInt16=(mask&2)!=0; enabled.robustBufferAccess=VK_FALSE;
             float priority=1; VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}; qi.queueFamilyIndex=family; qi.queueCount=1; qi.pQueuePriorities=&priority;
-            std::vector<const char*> extensions{VK_KHR_UNIFORM_BUFFER_STANDARD_LAYOUT_EXTENSION_NAME};
-            if(mask & 1) extensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
-            if(mask & 20) extensions.push_back(VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
+            std::vector<const char*> extensions{VK_EXT_ROBUSTNESS_2_EXTENSION_NAME};
+            if(api==VK_API_VERSION_1_1) {
+                extensions.push_back(VK_KHR_UNIFORM_BUFFER_STANDARD_LAYOUT_EXTENSION_NAME);
+                if(mask & 1) extensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+                if(mask & 20) extensions.push_back(VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
+            }
             if(api==VK_API_VERSION_1_1 && !(mask & 20)) ei.pNext=&e16;
             VkDeviceCreateInfo di{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; di.pNext=&es; di.pEnabledFeatures=&enabled; di.queueCreateInfoCount=1; di.pQueueCreateInfos=&qi;
-            if(api==VK_API_VERSION_1_1) {di.enabledExtensionCount=extensions.size();di.ppEnabledExtensionNames=extensions.data();}
+            di.enabledExtensionCount=extensions.size();di.ppEnabledExtensionNames=extensions.data();
             VkDevice device; Check(vkCreateDevice(physical,&di,nullptr,&device)); VkQueue queue; vkGetDeviceQueue(device,family,0,&queue);
             constexpr VkDeviceSize stride=65536, total=3*stride;
             VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; bi.size=total; bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
@@ -107,16 +113,25 @@ int main(int argc, char** argv) {
                 pci.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}; pci.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;pci.stage.module=module;pci.stage.pName="main";
                 VkPipeline pipeline; Check(vkCreateComputePipelines(device,VK_NULL_HANDLE,1,&pci,nullptr,&pipeline));
                 if(errors)return 1;
-                // Invalid guest addresses compile/create pipelines; execution is
-                // intentionally excluded: Vulkan returns undefined atomic results.
-                if(kind!=6) {
+                const bool fallback8 = (mask & 69) != 69;
+                const bool fallback16 = (mask & 74) != 74;
+                const bool both_fallback = fallback8 && fallback16;
+                // Preserve all valid-data tests, then exercise OOB and tiny/null
+                // descriptors with robustness disabled, solely on CAS paths.
+                for (unsigned variant=0; variant<(kind==0 && both_fallback ? 6u : 1u); ++variant) {
+                    if(kind==6 && !both_fallback) continue;
                     VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,14},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,2}};
                     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};dpi.maxSets=1;dpi.poolSizeCount=2;dpi.pPoolSizes=sizes;
                     VkDescriptorPool dp; Check(vkCreateDescriptorPool(device,&dpi,nullptr,&dp));
                     VkDescriptorSetAllocateInfo dsi{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};dsi.descriptorPool=dp;dsi.descriptorSetCount=1;dsi.pSetLayouts=&layout;
                     VkDescriptorSet set;Check(vkAllocateDescriptorSets(device,&dsi,&set));
                     std::vector<VkDescriptorBufferInfo> infos; for(unsigned i=0;i<ubos;++i)infos.push_back({buffer,0,stride});
-                    infos.push_back({buffer,stride,8192});if(kind==7)infos.push_back({buffer,2*stride,8192});
+                    const VkDeviceSize range = variant==1 ? 3 : variant==2 ? 8191 : variant>=4 ? 4 : 8192;
+                    const VkDeviceSize shift = variant==5 ? std::max<VkDeviceSize>(4, properties.limits.minStorageBufferOffsetAlignment) : 0;
+                    const VkDeviceSize base = stride + shift;
+                    infos.push_back({variant==3 ? VK_NULL_HANDLE : buffer, variant==3 ? 0 : base,
+                                     variant==3 ? VK_WHOLE_SIZE : range});
+                    if(kind==7)infos.push_back({buffer,2*stride,8192});
                     std::vector<VkWriteDescriptorSet> writes;
                     for(unsigned i=0;i<bindings.size();++i) {VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};w.dstSet=set;w.dstBinding=i;w.descriptorCount=1;w.descriptorType=bindings[i].descriptorType;w.pBufferInfo=&infos[i];writes.push_back(w);}
                     vkUpdateDescriptorSets(device,writes.size(),writes.data(),0,nullptr);
@@ -141,6 +156,14 @@ int main(int argc, char** argv) {
                         expected[4*lane+2]=ubo?0xef80:0x1234;expected[4*lane+3]=ubo?0xffffef80:0xffff8001;
                     }
                     if(kind==7)for(unsigned lane=0;lane<256;++lane)expected[lane]=0x8765a5a5;
+                    if(variant==2) expected[2047]=0xa5a5a5a5;
+                    if(variant==1 || variant>=3) {
+                        expected.fill(0xa5a5a5a5);
+                        std::memcpy(reinterpret_cast<uint8_t*>(expected.data())+6144,src,6);
+                        if(variant==4 || variant==5) expected[shift/4]=0x43424140;
+                    }
+                    const bool bounds_case = variant || kind==6;
+                    const auto errors_before = errors;
                     VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ca.commandPool=pool;ca.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ca.commandBufferCount=1;
                     VkCommandBuffer command;Check(vkAllocateCommandBuffers(device,&ca,&command));
                     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};Check(vkBeginCommandBuffer(command,&begin));
@@ -151,9 +174,10 @@ int main(int argc, char** argv) {
                     VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VkFence fence;Check(vkCreateFence(device,&fi,nullptr,&fence));
                     Check(vkQueueSubmit(queue,1,&submit,fence));Check(vkWaitForFences(device,1,&fence,VK_TRUE,30'000'000'000));
                     auto* actual=reinterpret_cast<uint32_t*>(memoryBytes+stride);
-                    for(unsigned i=0;i<expected.size();++i)if(actual[i]!=expected[i]){std::fprintf(stderr,"mask=%u kind=%u word=%u actual=%08X expected=%08X\n",mask,kind,i,actual[i],expected[i]);return 1;}
+                    for(unsigned i=0;i<expected.size();++i)if(actual[i]!=expected[i]){std::fprintf(stderr,"mask=%u kind=%u variant=%u word=%u actual=%08X expected=%08X\n",mask,kind,variant,i,actual[i],expected[i]);return 1;}
                     if(kind==7)for(unsigned i=0;i<64;++i)assert(reinterpret_cast<uint32_t*>(memoryBytes+2*stride)[i]==0x42424242);
                     vkDestroyFence(device,fence,nullptr);vkFreeCommandBuffers(device,pool,1,&command);vkDestroyDescriptorPool(device,dp,nullptr);++runs;
+                    if(bounds_case) { ++bounds_runs; assert(errors==errors_before); }
                 }
                 vkDestroyPipeline(device,pipeline,nullptr);vkDestroyShaderModule(device,module,nullptr);vkDestroyPipelineLayout(device,pipelineLayout,nullptr);vkDestroyDescriptorSetLayout(device,layout,nullptr);
                 if(errors)return 1;
@@ -162,6 +186,7 @@ int main(int argc, char** argv) {
         }
         destroyDebug(instance,messenger,nullptr);vkDestroyInstance(instance,nullptr);
     }
-    std::printf("PASS: %u real dispatches, 96 pipelines, native/fallback/concurrent adjacent values, %u validation errors\n",runs,errors);
+    assert(runs==120 && bounds_runs==36);
+    std::printf("PASS: %u dispatches (84 preserved + %u bounds/null/tiny cases), 96 pipelines, robustness disabled, %u validation errors\n",runs,bounds_runs,errors);
     return errors?1:0;
 }

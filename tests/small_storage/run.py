@@ -73,7 +73,11 @@ for module in sorted(modules.glob('*.spv')):
     assert ('OpAtomicCompareExchange' in text) == need_cas, module
     assert 'VariablePointers' not in text, module
     if need_cas:
-        assert 'OpAtomicLoad' in text, module
+        assert 'OpAtomicLoad' in text and 'OpArrayLength' in text, module
+        # Every CAS helper needs its own bound, including the two-binding case.
+        helpers = text.count('OpAtomicCompareExchange')
+        assert text.count('OpArrayLength') == helpers, module
+        assert text.count('OpULessThan') >= helpers, module
     if not mask & 1: assert 'OpCapability Int8' not in text, module
     if not mask & 2: assert 'OpCapability Int16' not in text, module
     count += 1
