@@ -85,6 +85,7 @@ struct StorageTypeDefinitions {
 };
 
 struct StorageDefinitions {
+    Id write_cas{};
     Id U8{};
     Id S8{};
     Id U16{};
@@ -337,6 +338,7 @@ private:
     void DefineTextures(const Info& info, u32& binding, u32& scaling_index);
     void DefineImages(const Info& info, u32& binding, u32& scaling_index);
     void DefineAttributeMemAccess(const Info& info);
+    void DefineWriteStorageCasLoopFunctions(const IR::Program& program);
     void DefineGlobalMemoryFunctions(const Info& info);
     void DefineRescalingInput(const Info& info);
     void DefineRescalingInputPushConstant();

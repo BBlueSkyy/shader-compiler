@@ -474,6 +474,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineTextures(program.info, texture_binding, bindings.texture_scaling_index);
     DefineImages(program.info, image_binding, bindings.image_scaling_index);
     DefineAttributeMemAccess(program.info);
+    DefineWriteStorageCasLoopFunctions(program);
     DefineGlobalMemoryFunctions(program.info);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
@@ -863,6 +864,72 @@ void EmitContext::DefineAttributeMemAccess(const Info& info) {
     }
 }
 
+// Adapted from yuzu 2a0d707 and Eden #4739. Discover actual fallback writes,
+// using the exact native-path predicates used by the emitters (not uses_int*).
+void EmitContext::DefineWriteStorageCasLoopFunctions(const IR::Program& program) {
+    const auto types = program.info.used_storage_buffer_types;
+    if ((!True(types & IR::Type::U8) || profile.SupportsStorage8Bit()) &&
+        (!True(types & IR::Type::U16) || profile.SupportsStorage16Bit())) {
+        return;
+    }
+    std::array<bool, Info::MAX_SSBOS> needed{};
+    for (const IR::Block* block : program.blocks) {
+        for (const IR::Inst& inst : *block) {
+            const auto op = inst.GetOpcode();
+            const bool small8 = op == IR::Opcode::WriteStorageU8 || op == IR::Opcode::WriteStorageS8;
+            const bool small16 = op == IR::Opcode::WriteStorageU16 || op == IR::Opcode::WriteStorageS16;
+            if ((!small8 || profile.SupportsStorage8Bit()) &&
+                (!small16 || profile.SupportsStorage16Bit())) {
+                continue;
+            }
+            const auto& binding = inst.Arg(0);
+            if (!binding.IsImmediate() || binding.U32() >= needed.size() ||
+                !Sirit::ValidId(ssbos[binding.U32()].U32)) {
+                throw NotImplementedException("Dynamic or invalid storage buffer indexing");
+            }
+            needed[binding.U32()] = true;
+        }
+    }
+    for (size_t i = 0; i < needed.size(); ++i) {
+        if (!needed[i]) {
+            continue;
+        }
+        const Id func_type{TypeFunction(void_id, U32[1], U32[1], U32[1], U32[1])};
+        const Id func{OpFunction(void_id, spv::FunctionControlMask::MaskNone, func_type)};
+        Name(func, fmt::format("write_storage_cas_{}", i));
+        const Id index{OpFunctionParameter(U32[1])};
+        const Id value{OpFunctionParameter(U32[1])};
+        const Id bit_offset{OpFunctionParameter(U32[1])};
+        const Id bit_count{OpFunctionParameter(U32[1])};
+        AddLabel();
+        const Id pointer{OpAccessChain(storage_types.U32.element, ssbos[i].U32, u32_zero_value, index)};
+        const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
+        const Id relaxed{u32_zero_value};
+        const Id loop{OpLabel()};
+        const Id body{OpLabel()};
+        const Id retry{OpLabel()};
+        const Id done{OpLabel()};
+        OpBranch(loop);
+        AddLabel(loop);
+        OpLoopMerge(done, retry, spv::LoopControlMask::MaskNone);
+        OpBranch(body);
+        AddLabel(body);
+        // An atomic load avoids racing a non-atomic load against adjacent CAS
+        // writes. Relaxed device scope is sufficient for a partial-word store.
+        const Id expected{OpAtomicLoad(U32[1], pointer, scope, relaxed)};
+        const Id desired{OpBitFieldInsert(U32[1], expected, value, bit_offset, bit_count)};
+        const Id actual{OpAtomicCompareExchange(U32[1], pointer, scope, relaxed, relaxed,
+                                               desired, expected)};
+        OpBranchConditional(OpIEqual(U1, expected, actual), done, retry);
+        AddLabel(retry);
+        OpBranch(loop);
+        AddLabel(done);
+        OpReturn();
+        OpFunctionEnd();
+        ssbos[i].write_cas = func;
+    }
+}
+
 void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     if (!info.uses_global_memory || !profile.support_int64) {
         return;
@@ -1053,7 +1120,9 @@ void EmitContext::DefineConstantBuffers(const Info& info, u32& binding) {
     }
     IR::Type types{info.used_constant_buffer_types | info.used_indirect_cbuf_types};
     if (True(types & IR::Type::U8)) {
-        if (profile.support_int8) {
+        if (profile.SupportsUniform8Bit()) {
+            AddExtension("SPV_KHR_8bit_storage");
+            AddCapability(spv::Capability::UniformAndStorageBuffer8BitAccess);
             DefineConstBuffers(*this, info, &UniformDefinitions::U8, binding, U8, 'u', sizeof(u8));
             DefineConstBuffers(*this, info, &UniformDefinitions::S8, binding, S8, 's', sizeof(s8));
         } else {
@@ -1061,7 +1130,9 @@ void EmitContext::DefineConstantBuffers(const Info& info, u32& binding) {
         }
     }
     if (True(types & IR::Type::U16)) {
-        if (profile.support_int16) {
+        if (profile.SupportsUniform16Bit()) {
+            AddExtension("SPV_KHR_16bit_storage");
+            AddCapability(spv::Capability::UniformAndStorageBuffer16BitAccess);
             DefineConstBuffers(*this, info, &UniformDefinitions::U16, binding, U16, 'u',
                                sizeof(u16));
             DefineConstBuffers(*this, info, &UniformDefinitions::S16, binding, S16, 's',
@@ -1121,11 +1192,15 @@ void EmitContext::DefineConstantBufferIndirectFunctions(const Info& info) {
         return func;
     }};
     IR::Type types{info.used_indirect_cbuf_types};
+    if ((True(types & IR::Type::U8) && !profile.SupportsUniform8Bit()) ||
+        (True(types & IR::Type::U16) && !profile.SupportsUniform16Bit())) {
+        types |= IR::Type::U32;
+    }
     bool supports_aliasing = profile.support_descriptor_aliasing;
-    if (supports_aliasing && True(types & IR::Type::U8)) {
+    if (profile.SupportsUniform8Bit() && True(types & IR::Type::U8)) {
         load_const_func_u8 = make_accessor(U8, &UniformDefinitions::U8);
     }
-    if (supports_aliasing && True(types & IR::Type::U16)) {
+    if (profile.SupportsUniform16Bit() && True(types & IR::Type::U16)) {
         load_const_func_u16 = make_accessor(U16, &UniformDefinitions::U16);
     }
     if (supports_aliasing && True(types & IR::Type::F32)) {
@@ -1148,15 +1223,23 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
     }
     AddExtension("SPV_KHR_storage_buffer_storage_class");
 
-    const IR::Type used_types{profile.support_descriptor_aliasing ? info.used_storage_buffer_types
+    IR::Type used_types{profile.support_descriptor_aliasing ? info.used_storage_buffer_types
                                                                   : IR::Type::U32};
-    if (profile.support_int8 && True(used_types & IR::Type::U8)) {
+    if ((True(used_types & IR::Type::U8) && !profile.SupportsStorage8Bit()) ||
+        (True(used_types & IR::Type::U16) && !profile.SupportsStorage16Bit())) {
+        used_types |= IR::Type::U32;
+    }
+    if (profile.SupportsStorage8Bit() && True(used_types & IR::Type::U8)) {
+        AddExtension("SPV_KHR_8bit_storage");
+        AddCapability(spv::Capability::StorageBuffer8BitAccess);
         DefineSsbos(*this, storage_types.U8, &StorageDefinitions::U8, info, binding, U8,
                     sizeof(u8));
         DefineSsbos(*this, storage_types.S8, &StorageDefinitions::S8, info, binding, S8,
                     sizeof(u8));
     }
-    if (profile.support_int16 && True(used_types & IR::Type::U16)) {
+    if (profile.SupportsStorage16Bit() && True(used_types & IR::Type::U16)) {
+        AddExtension("SPV_KHR_16bit_storage");
+        AddCapability(spv::Capability::StorageBuffer16BitAccess);
         DefineSsbos(*this, storage_types.U16, &StorageDefinitions::U16, info, binding, U16,
                     sizeof(u16));
         DefineSsbos(*this, storage_types.S16, &StorageDefinitions::S16, info, binding, S16,

@@ -17,6 +17,11 @@ struct Profile {
     bool support_int8{};
     bool support_int16{};
     bool support_int64{};
+    // Interface storage features are independent of integer arithmetic support.
+    bool support_storage_buffer_8bit{};
+    bool support_storage_buffer_16bit{};
+    bool support_uniform_buffer_8bit{};
+    bool support_uniform_buffer_16bit{};
     bool support_vertex_instance_id{};
     bool support_float_controls{};
     bool support_separate_denorm_behavior{};
@@ -95,6 +100,19 @@ struct Profile {
 
     bool SupportsSubgroupStage(Stage stage) const {
         return (supported_subgroup_stages & (1u << static_cast<u32>(stage))) != 0;
+    }
+
+    bool SupportsStorage8Bit() const {
+        return support_int8 && support_storage_buffer_8bit && support_descriptor_aliasing;
+    }
+    bool SupportsStorage16Bit() const {
+        return support_int16 && support_storage_buffer_16bit && support_descriptor_aliasing;
+    }
+    bool SupportsUniform8Bit() const {
+        return support_int8 && support_uniform_buffer_8bit && support_descriptor_aliasing;
+    }
+    bool SupportsUniform16Bit() const {
+        return support_int16 && support_uniform_buffer_16bit && support_descriptor_aliasing;
     }
 };
 
