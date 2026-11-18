@@ -871,9 +871,9 @@ void EmitContext::DefineAttributeMemAccess(const Info& info) {
 // the dependency pinned and emits standard SPIR-V 1.0 instructions only.
 std::vector<u32> EmitContext::Assemble() const {
     auto module = Sirit::Module::Assemble();
-    const auto helpers = std::count_if(ssbos.begin(), ssbos.end(), [](const auto& buffer) {
+    const auto helpers = static_cast<size_t>(std::count_if(ssbos.begin(), ssbos.end(), [](const auto& buffer) {
         return Sirit::ValidId(buffer.write_cas);
-    });
+    }));
     if (!helpers) {
         return module;
     }
@@ -905,7 +905,7 @@ std::vector<u32> EmitContext::Assemble() const {
             });
             pending = found == ssbos.end() ? nullptr : &*found;
         }
-        guarded.insert(guarded.end(), module.begin() + pos, module.begin() + pos + count);
+        guarded.insert(guarded.end(), module.data() + pos, module.data() + pos + count);
         if (pending && op == spv::Op::OpLabel) {
             const u32 length = next_id++;
             const u32 in_range = next_id++;
