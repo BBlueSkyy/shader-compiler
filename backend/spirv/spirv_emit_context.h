@@ -85,6 +85,8 @@ struct StorageTypeDefinitions {
 };
 
 struct StorageDefinitions {
+    Id write_cas{};
+    Id write_cas_index{};
     Id U8{};
     Id S8{};
     Id U16{};
@@ -121,6 +123,8 @@ public:
     explicit EmitContext(const Profile& profile, const RuntimeInfo& runtime_info,
                          IR::Program& program, Bindings& binding);
     ~EmitContext();
+
+    [[nodiscard]] std::vector<u32> Assemble() const;
 
     [[nodiscard]] Id Def(const IR::Value& value);
 
@@ -337,6 +341,7 @@ private:
     void DefineTextures(const Info& info, u32& binding, u32& scaling_index);
     void DefineImages(const Info& info, u32& binding, u32& scaling_index);
     void DefineAttributeMemAccess(const Info& info);
+    void DefineWriteStorageCasLoopFunctions(const IR::Program& program);
     void DefineGlobalMemoryFunctions(const Info& info);
     void DefineRescalingInput(const Info& info);
     void DefineRescalingInputPushConstant();
